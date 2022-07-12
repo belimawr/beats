@@ -20,10 +20,12 @@ package gotool
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/magefile/mage/mg"
 	"github.com/magefile/mage/sh"
+	"golang.org/x/mod/modfile"
 )
 
 // Args holds parameters, environment variables and flag information used to
@@ -56,8 +58,24 @@ type goTest func(opts ...ArgOpt) error
 // Test runs `go test` and provides optionals for adding command line arguments.
 var Test goTest = runGoTest
 
+func GetModuleName118(root string) (string, error) {
+	goModFilePath := filepath.Join(root, "go.mod")
+	goModFileData, err := os.ReadFile(goModFilePath)
+	if err != nil {
+		return "", err
+	}
+	moduleName := modfile.ModulePath([]byte(goModFileData))
+	if moduleName == "" {
+		return "", fmt.Errorf("cannot find module name on: %s", goModFilePath)
+	}
+
+	return "", nil
+}
+
 // GetModuleName returns the name of the module.
 func GetModuleName() (string, error) {
+	// My hack
+
 	lines, err := getLines(callGo(nil, "list", "-m"))
 	if err != nil {
 		return "", err

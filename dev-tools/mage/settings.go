@@ -638,7 +638,8 @@ func getProjectRepoInfoWithModules() (*ProjectRepoInfo, error) {
 		return nil, errors.Errorf("failed to find root dir of module file: %v", errs)
 	}
 
-	rootImportPath, err := gotool.GetModuleName()
+	fmt.Println(rootDir)
+	rootImportPath, err := gotool.GetModuleName118(rootDir)
 	if err != nil {
 		return nil, err
 	}
