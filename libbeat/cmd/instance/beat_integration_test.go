@@ -27,7 +27,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"runtime"
 	"sync"
 	"testing"
 	"time"
@@ -87,7 +86,6 @@ func (mb *mockbeat) waitUntilRunning() {
 
 func (mb *mockbeat) Stop() {
 	mb.stopOnce.Do(func() {
-		fmt.Println("********************************** STOP")
 		close(mb.done)
 	})
 }
@@ -231,8 +229,7 @@ logging:
     name: "filebeat"
 `
 
-func TestExitOnCertsChange(t *testing.T) {
-	tmpDir := t.TempDir()
+func prepareFilesForExitOnCertsChange(t *testing.T, tmpDir string) (string, string) {
 	caCertFilePath := filepath.Join(tmpDir, "ca.crt")
 	caFile, err := os.Create(caCertFilePath)
 	if err != nil {
@@ -260,6 +257,13 @@ func TestExitOnCertsChange(t *testing.T) {
 		t.Fatalf("cannot close mockbeat config file: %s", err)
 	}
 
+	return caCertFilePath, configFilePath
+}
+
+func TestExitOnCertsChange(t *testing.T) {
+	tmpDir := t.TempDir()
+	caCertFilePath, configFilePath := prepareFilesForExitOnCertsChange(t, tmpDir)
+
 	// For some reason, sometimes, libbeat could not read the file
 	// so we add a delay here
 	time.Sleep(10 * time.Millisecond)
@@ -281,16 +285,11 @@ func TestExitOnCertsChange(t *testing.T) {
 		})
 	}()
 
-	t.Cleanup(func() {
-		mockBeat.Stop()
-	})
-
 	// Make sure the beat is running
 	mockBeat.waitUntilRunning()
 
 	// The filewatcher runs on a different goroutine, so we wait a bit
 	// to make sure it starts running
-	runtime.Gosched()
 	time.Sleep(10 * time.Millisecond)
 
 	// Modify the cert file by adding a new line
@@ -305,9 +304,17 @@ func TestExitOnCertsChange(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// Wait for mockBeat to fully stop
 	wg.Wait()
-	// All logs should have been flushed by now, so try to read the file
-	// time.Sleep(10 * time.Millisecond)
+
+	lines := []string{
+		fmt.Sprintf(`some of the following files have been modified: [%s/ca.crt], starting mockbeat shutdown`, tmpDir),
+		"mockbeat stopped.",
+	}
+	ensureLogsArePresent(t, tmpDir, lines)
+}
+
+func ensureLogsArePresent(t *testing.T, tmpDir string, lines []string) {
 	today := time.Now().Format("20060102")
 	logFilePath := filepath.Join(tmpDir, "filebeat-"+today+".ndjson")
 	logFile, err := os.Open(logFilePath)
@@ -316,14 +323,9 @@ func TestExitOnCertsChange(t *testing.T) {
 	}
 	defer logFile.Close()
 
-	lines := []string{
-		fmt.Sprintf(`some of the following files have been modified: [%s/ca.crt], starting mockbeat shutdown`, tmpDir),
-		"mockbeat stopped.",
-	}
 	foundLines := 0
 
 	reader := bufio.NewReader(logFile)
-
 	for {
 		line, err := reader.ReadBytes('\n')
 		if errors.Is(err, io.EOF) {
