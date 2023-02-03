@@ -1027,11 +1027,12 @@ func (b *Beat) reloadOutputOnCertChange(cfg config.Namespace) error {
 		extendedTLSCfg.Certificate.Key,
 	)
 
-	for _, ca := range possibleFilesToWatch {
-		if ca == "" {
+	filesToWatch := []string{}
+	for _, f := range possibleFilesToWatch {
+		if f == "" {
 			continue
 		}
-		if tlscommon.IsPEMString(ca) {
+		if tlscommon.IsPEMString(f) {
 			// That's an embedded cert, we're only interested in files
 			continue
 		}
