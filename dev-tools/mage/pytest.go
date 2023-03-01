@@ -335,10 +335,16 @@ func LookVirtualenvPath(ve, file string) (string, error) {
 	// having to re-implement the exec.LookPath logic. And does not require us
 	// to "deactivate" the virtualenv because we never activated it.
 	path := os.Getenv("PATH")
+	fmt.Println(">>>>>>>>>>>>>> PATH:", path)
 	os.Setenv("PATH", virtualenvPath(ve)+string(filepath.ListSeparator)+path)
+	fmt.Println(">>>>>>>>>>>>>> PATH:", os.Getenv("PATH"))
+
 	defer os.Setenv("PATH", path)
 
-	return exec.LookPath(file)
+	ret, err := exec.LookPath(file)
+	fmt.Println("++++++++=>>>>>>>>>>>>>>>>>> Ret", ret)
+
+	return ret, err
 }
 
 func expandVirtualenvReqs() []string {
