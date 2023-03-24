@@ -131,10 +131,10 @@ func (p *Runner) Run() {
 	for {
 		select {
 		case <-p.done:
-			logp.Info("input ticker stopped")
+			logp.Info("input %s ticker stopped", p.config.ID)
 			return
 		case <-time.After(p.config.ScanFrequency):
-			logp.Debug("input", "Run input")
+			logp.Debug("input", "Run input "+p.config.ID)
 			p.input.Run()
 		}
 	}
@@ -143,20 +143,24 @@ func (p *Runner) Run() {
 // Stop stops the input and with it all harvesters
 func (p *Runner) Stop() {
 	// Stop scanning and wait for completion
+	logp.Debug("input_runner", "input runner %s Stop called", p.config.ID)
 	close(p.done)
 	p.wg.Wait()
 	inputList.Remove(p.config.Type)
+	logp.Debug("input_runner", "input runner %s Stop done", p.config.ID)
 }
 
 func (p *Runner) stop() {
 	// In case of once, it will be waited until harvesters close itself
 	if p.Once {
+		logp.Debug("input_runner", "input runner %s p.input.wait", p.config.ID)
 		p.input.Wait()
 	} else {
 		p.input.Stop()
+		logp.Debug("input_runner", "input runner %s p.input.stop", p.config.ID)
 	}
 }
 
 func (p *Runner) String() string {
-	return fmt.Sprintf("input [type=%s]", p.config.Type)
+	return fmt.Sprintf("input [type=%s] [id=%s]", p.config.Type, p.config.ID)
 }

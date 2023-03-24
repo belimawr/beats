@@ -30,6 +30,9 @@ import (
 	"github.com/elastic/elastic-agent-libs/mapstr"
 )
 
+// TODO: Make sure the stop waits the runnesrs to finish
+// make sure start/stop only runs once
+
 type runner struct {
 	id      int64
 	started bool

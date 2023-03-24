@@ -57,7 +57,9 @@ func eventACKer(statelessOut statelessLogger, statefulOut statefulLogger) beat.E
 
 		if len(states) > 0 {
 			log.Debugw("stateful ack", "count", len(states))
-			statefulOut.Published(states)
+			statefulOut.Published(states) // HERE THE ACKER CHANGES THE STATE OF THE HARVESTER!!!
+			// The statefulOut sends the state to the retistrar, that EVENTUALLY updates the state of the file
+			// in the in memory registry, which efectivelly changes the harvester state back to unfinished
 		}
 
 		if stateless > 0 {

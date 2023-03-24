@@ -33,6 +33,7 @@ type inputConfig struct {
 	ScanFrequency time.Duration `config:"scan_frequency" validate:"min=0,nonzero"`
 	Type          string        `config:"type"`
 	InputType     string        `config:"input_type"`
+	ID            string        `config:"id"`
 }
 
 func (c *inputConfig) Validate() error {

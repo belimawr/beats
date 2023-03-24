@@ -46,6 +46,7 @@ func NewStates() *States {
 
 // Update updates a state. If previous state didn't exist, new one is created
 func (s *States) Update(newState State) {
+	// fmt.Printf("States.Update: ID: %s, Finished: %t, \n", newState.Id, newState.Finished)
 	s.UpdateWithTs(newState, time.Now())
 }
 
@@ -59,6 +60,7 @@ func (s *States) UpdateWithTs(newState State, ts time.Time) {
 	index := s.findPrevious(id)
 	newState.Timestamp = ts
 
+	// TODO: log here the actual state update. To be less verbose it can be hardcoded to a single file
 	if index >= 0 {
 		s.states[index] = newState
 	} else {

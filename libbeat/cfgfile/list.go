@@ -51,12 +51,15 @@ func NewRunnerList(name string, factory RunnerFactory, pipeline beat.PipelineCon
 	}
 }
 
+// TODO: Check if something else could start/stop inputs/runners
+
 // Reload the list of runners to match the given state
 func (r *RunnerList) Reload(configs []*reload.ConfigWithMeta) error {
 	r.mutex.Lock()
 	defer r.mutex.Unlock()
 
 	var errs multierror.Errors
+	lookup := map[uint64]string{}
 
 	startList := map[uint64]*reload.ConfigWithMeta{}
 	stopList := r.copyRunnerList()
@@ -65,6 +68,13 @@ func (r *RunnerList) Reload(configs []*reload.ConfigWithMeta) error {
 
 	// diff current & desired state, create action lists
 	for _, config := range configs {
+		tmp := struct {
+			Paths []string `config:"paths" yaml:"paths"`
+		}{}
+		if err := config.Config.Unpack(&tmp); err != nil {
+			r.logger.Errorf("cannot unpack for debug: %s", err)
+		}
+
 		hash, err := HashConfig(config.Config)
 		if err != nil {
 			r.logger.Errorf("Unable to hash given config: %s", err)
@@ -72,10 +82,14 @@ func (r *RunnerList) Reload(configs []*reload.ConfigWithMeta) error {
 			continue
 		}
 
-		if _, ok := r.runners[hash]; ok {
+		if runner, ok := r.runners[hash]; ok {
+			r.logger.Debugf("%s Already running", runner)
+			lookup[hash] = runner.String()
 			delete(stopList, hash)
 		} else {
+			r.logger.Debugf("%s Not     running", tmp.Paths[0])
 			startList[hash] = config
+			lookup[hash] = tmp.Paths[0]
 		}
 	}
 
@@ -96,10 +110,13 @@ func (r *RunnerList) Reload(configs []*reload.ConfigWithMeta) error {
 	}
 
 	// Wait for all runners to stop before starting new ones
+	r.logger.Debug("waiting all runners to stop")
 	wg.Wait()
+	r.logger.Debug("all runners stopped")
 
 	// Start new runners
 	for hash, config := range startList {
+		r.logger.Debugf("Trying to start runner %s", lookup[hash])
 		runner, err := createRunner(r.factory, r.pipeline, config)
 		if err != nil {
 			if _, ok := err.(*common.ErrInputNotFinished); ok {

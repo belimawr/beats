@@ -263,6 +263,8 @@ func (r *Registrar) processEventStates(states []file.State) {
 
 	ts := time.Now()
 	for i := range states {
+		// Events somehow seem to reach this line and modify the harvester state
+		r.log.Debugf("processing source: %s, finished: %t", states[i].Source, states[i].Finished)
 		r.states.UpdateWithTs(states[i], ts)
 		statesUpdate.Add(1)
 	}

@@ -269,6 +269,7 @@ func (h *Harvester) Run() error {
 	}
 
 	defer func() {
+		h.logger.Infof("Defer from harvester %s started. State: %t", h.config.Paths[0], h.state.Finished)
 		// Channel to stop internal harvester routines
 		h.stop()
 
@@ -279,6 +280,7 @@ func (h *Harvester) Run() error {
 
 		// Marks harvester stopping completed
 		h.stopWg.Done()
+		h.logger.Infof("Defer from harvester %s FINISHED. State: %t", h.config.Paths[0], h.state.Finished)
 	}()
 
 	harvesterStarted.Add(1)
@@ -311,6 +313,7 @@ func (h *Harvester) Run() error {
 	logger.Infof("Harvester started for paths: %v", h.config.Paths)
 
 	h.doneWg.Add(1)
+	// defer h.doneWg.Done() // is this the fix?
 	go func() {
 		h.monitorFileSize()
 		h.doneWg.Done()
@@ -387,11 +390,17 @@ func (h *Harvester) monitorFileSize() {
 
 // stop is intended for internal use and closed the done channel to stop execution
 func (h *Harvester) stop() {
+	h.logger.Infof("harvester %s stop() called, current state %t", h.config.Paths[0], h.state.Finished)
+	fmt.Printf("harvester %s stop() called, current state %t\n", h.config.Paths[0], h.state.Finished)
 	h.stopOnce.Do(func() {
+		h.logger.Infof("harvester %s stop() doOnce called, current state %t", h.config.Paths[0], h.state.Finished)
+		fmt.Printf("harvester %s stop() doOnce called, current state %t\n", h.config.Paths[0], h.state.Finished)
 		close(h.done)
 		// Wait for goroutines monitoring h.done to terminate before closing source.
 		h.doneWg.Wait()
 		filesMetrics.Remove(h.id.String())
+		h.logger.Infof("harvester %s stop() doOnce done, current state %t", h.config.Paths[0], h.state.Finished)
+		fmt.Printf("harvester %s stop() doOnce done, current state %t\n", h.config.Paths[0], h.state.Finished)
 	})
 }
 
@@ -402,6 +411,7 @@ func (h *Harvester) Stop() {
 	h.stopLock.Lock()
 	h.stopWg.Wait()
 	h.stopLock.Unlock()
+	h.logger.Debugf("harvester %s stopped with state %t", h.ID().String(), h.state.Finished)
 }
 
 // onMessage processes a new message read from the reader.
@@ -481,13 +491,15 @@ func (h *Harvester) onMessage(
 // is started. As soon as the output becomes available again, the finished state is written
 // and processing can continue.
 func (h *Harvester) SendStateUpdate() {
+	h.logger.Infof("harvester %s SendStateUpdate, State: %t, has state: %t", h.config.Paths[0], h.state.Finished, h.source.HasState())
+	fmt.Printf("harvester %s SendStateUpdate, State: %t, has state: %t\n", h.config.Paths[0], h.state.Finished, h.source.HasState())
 	if !h.source.HasState() {
 		return
 	}
 
 	h.publishState(h.state)
 
-	h.logger.Debugf("Update state (offset: %v).", h.state.Offset)
+	h.logger.Infof("Update state (offset: %v).", h.state.Offset)
 	h.states.Update(h.state)
 }
 
@@ -615,7 +627,8 @@ func (h *Harvester) cleanup() {
 
 	h.logger.Debugf("Stopping harvester.")
 	defer h.logger.Debugf("harvester cleanup finished.")
-
+	defer h.logger.Infof("harvester %s cleanup finished, state: %t", h.config.Paths[0], h.state.Finished)
+	defer fmt.Printf("harvester %s cleanup finished, state: %t\n", h.config.Paths[0], h.state.Finished)
 	// Make sure file is closed as soon as harvester exits
 	// If file was never opened, it can't be closed
 	if h.source != nil {
@@ -629,6 +642,8 @@ func (h *Harvester) cleanup() {
 		// On completion, push offset so we can continue where we left off if we relaunch on the same file
 		// Only send offset if file object was created successfully
 		h.SendStateUpdate()
+		h.logger.Infof("harvester %s cleanup finished. Update sent state: %t", h.config.Paths[0], h.state.Finished)
+
 	} else {
 		h.logger.Warn("Stopping harvester, NOT closing file as file info not available.")
 	}

@@ -25,6 +25,7 @@ import (
 	"github.com/elastic/beats/v7/libbeat/common"
 	"github.com/elastic/beats/v7/libbeat/publisher/pipeline"
 	conf "github.com/elastic/elastic-agent-libs/config"
+	"github.com/elastic/elastic-agent-libs/logp"
 )
 
 // RunnerFactory is a factory for registrars
@@ -59,14 +60,29 @@ func (r *RunnerFactory) Create(
 }
 
 func (r *RunnerFactory) CheckConfig(cfg *conf.C) error {
+	logger := logp.L().Named("runnerFactory")
+	tmp := struct {
+		ID []string `config:"id" yaml:"id"`
+	}{}
+	if err := cfg.Unpack(&tmp); err != nil {
+		logger.Errorf("cannot unpack for debug: %s", err)
+		panic(err)
+	}
+
+	logger.Info("CheckConfig - ", tmp.ID)
+	defer logger.Info("CheckConfig done - ", tmp.ID)
 	runner, err := r.Create(pipeline.NewNilPipeline(), cfg)
 	if _, ok := err.(*common.ErrInputNotFinished); ok {
+		logger.Info("CheckConfig - ErrInputNotFinished - ", tmp.ID)
 		// error is related to state, and hence config can be considered valid
 		return nil
 	}
 	if err != nil {
+		logger.Info("CheckConfig - %s - Error: %s", tmp.ID, err.Error())
 		return err
 	}
+	logger.Infof("runner '%s' created", runner.String())
 	runner.Stop()
+	logger.Infof("runner '%s' finished stopping", runner.String())
 	return nil
 }

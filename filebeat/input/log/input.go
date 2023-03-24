@@ -716,7 +716,7 @@ func (p *Input) createHarvester(logger *logp.Logger, state file.State, onTermina
 		state,
 		p.states,
 		func(state file.State) bool {
-			return p.stateOutlet.OnEvent(beat.Event{Private: state})
+			return p.stateOutlet.OnEvent(beat.Event{Private: state}) // here the function to publish the state of a published event
 		},
 		subOutletWrap(p.outlet),
 	)
@@ -823,6 +823,8 @@ func (p *Input) Stop() {
 
 		// stop all communication between harvesters and publisher pipeline
 		p.outlet.Close()
+
+		p.logger.Debugf("stopped input: %s", p.config.Paths[0])
 	})
 }
 

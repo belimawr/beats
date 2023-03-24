@@ -72,6 +72,7 @@ func (r *Registry) WaitForCompletion() {
 
 // Start starts the given harvester and add its to the registry
 func (r *Registry) Start(h Harvester) error {
+	logp.L().Named("harvester_registry").Infof("Start harvester: %s", h.ID().String())
 	// Make sure stop is not called during starting a harvester
 	r.Lock()
 	defer r.Unlock()
@@ -91,9 +92,12 @@ func (r *Registry) Start(h Harvester) error {
 		defer func() {
 			r.remove(h)
 			r.wg.Done()
+			logp.Debug("harvester_registry", "Stopped harvester: %s", h.ID().String())
 		}()
 		// Starts harvester and picks the right type. In case type is not set, set it to default (log)
+		logp.Debug("harvester_registry", "Starting harvester: %s", h.ID().String())
 		err := h.Run()
+		logp.Debug("harvester_registry", "Finished harvester: %s", h.ID().String())
 		if err != nil {
 			logp.Err("Error running input: %v", err)
 		}

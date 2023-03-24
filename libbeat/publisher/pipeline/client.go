@@ -83,6 +83,12 @@ func (c *client) publish(e beat.Event) {
 		log     = c.pipeline.monitors.Logger
 	)
 
+	// if e.Private != nil {
+	// 	if state, ok := e.Private.(file.State); ok {
+	// 		fmt.Printf("========ID:%s, Finished: %t, Offset: %d\n", state.Id, state.Finished, state.Offset)
+	// 	}
+	// }
+
 	c.onNewEvent()
 
 	if !c.isOpen.Load() {
