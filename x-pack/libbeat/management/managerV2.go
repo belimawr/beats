@@ -6,6 +6,7 @@ package management
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/signal"
@@ -410,9 +411,16 @@ func (cm *BeatV2Manager) unitListen() {
 			cm.UpdateStatus(lbmanagement.Stopping, "Stopping")
 			return
 		case change := <-cm.client.UnitChanges():
+			// This is a unbuffered channel, so in theory, if they client is sending first the remove/delete
+			// then the added/changed. It should work if we execute things in order
+			//
+			// The elastic-agent-client (elastic-agent-client/pkg/client/client_v2.go:487
+			// actually sends all stop units then a mix of updates and additions.
+			// The problem we need to solve now is how to wait for all stops to happen.
+			// We could accumulate and do a debounce logic, but the question is for how log to wait.
 			cm.logger.Infof(
-				"BeatV2Manager.unitListen UnitChanged.Type(%s), UnitChanged.Trigger(%d): %s/%s",
-				change.Type, int64(change.Triggers), change.Type, change.Triggers)
+				"BeatV2Manager.unitListen UnitChanged.Type(%s), UnitChanged.Trigger(%d): %s/%s, ID: %s",
+				change.Type, int64(change.Triggers), change.Type, change.Triggers, change.Unit.ID())
 
 			switch change.Type {
 			// Within the context of how we send config to beats, I'm not sure if there is a difference between
@@ -421,7 +429,7 @@ func (cm *BeatV2Manager) unitListen() {
 				cm.addUnit(change.Unit)
 				// reset can be called here because `<-t.C` is handled in the same select
 				t.Reset(changeDebounce)
-			case client.UnitChangedModified:
+			case client.UnitChangedModified: // Let's ignore it for now. I have no clue how this actually works (if it does)
 				cm.modifyUnit(change.Unit)
 				// reset can be called here because `<-t.C` is handled in the same select
 				t.Reset(changeDebounce)
@@ -438,6 +446,10 @@ func (cm *BeatV2Manager) unitListen() {
 				units[k] = u
 			}
 			cm.mx.Unlock()
+
+			// That somehow seems to make sense. We only execute changes every 100ms...
+			// The units slice seems to work like a whole new Beat config, if the beat was
+			// reading it from a config file. If that is so, then why it does not work?
 			cm.reload(units)
 		}
 	}
@@ -529,11 +541,15 @@ func (cm *BeatV2Manager) reload(units map[unitKey]*client.Unit) {
 	//
 	// in v2 only a single input type will be started per component, so we don't need to
 	// worry about getting multiple re-loaders (we just need the one for the type)
+	//
+	// TIAGO: if we're reloading the whole bunch like we do from a config file,
+	// then it should work
 	if err := cm.reloadInputs(inputUnits); err != nil {
 		errs = append(errs, err)
 	}
 
 	// report the stopping units as stopped
+	// TIAGO: Just status reporting, we can't map it to the real input/runner (yet? why not?)
 	for _, unit := range stoppingUnits {
 		_ = unit.UpdateState(client.UnitStateStopped, "Stopped", nil)
 	}
@@ -647,6 +663,22 @@ func (cm *BeatV2Manager) reloadInputs(inputUnits []*client.Unit) error {
 		return nil
 	}
 
+	// TIAGO: this seems to be calling cfgfile/list.go:Reload correctly...
+	// I don't get why my logs show things happening on a different order!
+	for _, input := range inputBeatCfgs {
+		cfg := map[string]any{}
+		if err := input.Config.Unpack(&cfg); err != nil {
+			cm.logger.Errorf("cannot unpack config for debugging: %s", err)
+			continue
+		}
+		jsonData, err := json.Marshal(cfg)
+		if err != nil {
+			cm.logger.Errorf("cannot marshal config into JSON: %s", err)
+			continue
+		}
+
+		cm.logger.Debugf("received Input config: %q", string(jsonData))
+	}
 	err := obj.Reload(inputBeatCfgs)
 	if err != nil {
 		return fmt.Errorf("failed to reloading inputs: %w", err)
