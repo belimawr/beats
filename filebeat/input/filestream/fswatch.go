@@ -147,6 +147,8 @@ func (w *fileWatcher) watch(ctx unison.Canceler) {
 			continue
 		}
 
+		cleanInactive := 3 * time.Minute
+
 		var e loginp.FSEvent
 		switch {
 
@@ -166,6 +168,10 @@ func (w *fileWatcher) watch(ctx unison.Canceler) {
 		case prevDesc.Info.Size() < fd.Info.Size():
 			e = writeEvent(path, fd)
 			writtenCount++
+
+		case time.Now().Sub(fd.Info.ModTime()) >= cleanInactive:
+			w.log.Debugf("Clean inactive reached for: %s", fd.Info.Name())
+			e = cleanInactiveEvent(path, fd)
 		}
 
 		// if none of the conditions were true, the file remained unchanged and we don't need to create an event
@@ -237,6 +243,10 @@ func createEvent(path string, fd loginp.FileDescriptor) loginp.FSEvent {
 
 func writeEvent(path string, fd loginp.FileDescriptor) loginp.FSEvent {
 	return loginp.FSEvent{Op: loginp.OpWrite, OldPath: path, NewPath: path, Descriptor: fd}
+}
+
+func cleanInactiveEvent(path string, fd loginp.FileDescriptor) loginp.FSEvent {
+	return loginp.FSEvent{Op: loginp.OpCleanInactive, OldPath: path, NewPath: path, Descriptor: fd}
 }
 
 func truncateEvent(path string, fd loginp.FileDescriptor) loginp.FSEvent {

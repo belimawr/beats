@@ -18,6 +18,7 @@
 package filestream
 
 import (
+	"errors"
 	"fmt"
 	"time"
 
@@ -216,6 +217,12 @@ func (p *fileProspector) onFSEvent(
 
 		p.onRename(log, ctx, event, src, updater, group)
 
+	case loginp.OpCleanInactive:
+		if err := updater.Remove(src); err != nil {
+			if !errors.Is(err, loginp.ErrAlreadyDeleted) {
+				log.Errorf("could not remove state for '%': %s", src.Name(), err)
+			}
+		}
 	default:
 		log.Error("Unknown return value %v", event.Op)
 	}

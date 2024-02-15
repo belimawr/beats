@@ -18,6 +18,7 @@
 package input_logfile
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -32,6 +33,8 @@ import (
 	"github.com/elastic/go-concert"
 	"github.com/elastic/go-concert/unison"
 )
+
+var ErrAlreadyDeleted = errors.New("has been deleted")
 
 // sourceStore is a store which can access resources using the Source
 // from an input.
@@ -379,10 +382,10 @@ func (s *store) resetCursor(key string, cur interface{}) error {
 }
 
 // Removes marks an entry for removal by setting its TTL to zero.
-func (s *store) remove(key string) error {
+func (s *store) remove(key string) error { // this is called by my implementation
 	resource := s.ephemeralStore.Find(key, false)
 	if resource == nil {
-		return fmt.Errorf("resource '%s' not found", key)
+		return fmt.Errorf("'%s' %w", key, ErrAlreadyDeleted)
 	}
 	s.UpdateTTL(resource, 0)
 	resource.Release()

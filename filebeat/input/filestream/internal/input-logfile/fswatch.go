@@ -31,16 +31,18 @@ const (
 	OpRename
 	OpTruncate
 	OpArchived
+	OpCleanInactive
 )
 
 var operationNames = map[Operation]string{
-	OpDone:     "done",
-	OpCreate:   "create",
-	OpWrite:    "write",
-	OpDelete:   "delete",
-	OpRename:   "rename",
-	OpTruncate: "truncate",
-	OpArchived: "archive",
+	OpDone:          "done",
+	OpCreate:        "create",
+	OpWrite:         "write",
+	OpDelete:        "delete",
+	OpRename:        "rename",
+	OpTruncate:      "truncate",
+	OpArchived:      "archive",
+	OpCleanInactive: "clean inactive",
 }
 
 // Operation describes what happened to a file.
