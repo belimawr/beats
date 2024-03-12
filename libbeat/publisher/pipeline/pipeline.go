@@ -308,8 +308,59 @@ func (p *Pipeline) registerSignalPropagation(c *client) {
 		p.sigNewClient = make(chan *client, 1)
 		go p.runSignalPropagation()
 	})
+
+	// That's the real deal. This function just needs to send on this channel
 	p.sigNewClient <- c
 }
+func (p *Pipeline) signalPropagationWorker(channels *[]reflect.SelectCase, clients *[]*client) (int, reflect.Value, bool) {
+	// for {
+	chosen, value, recvOK := reflect.Select(*channels)
+	// fmt.Printf("================================================== [Worker] Chosen: %d, Value Received: %t\n", chosen, recvOK)
+
+	// The first element is a channel to receive clients, we do not touch it.
+	if chosen == 0 {
+		return chosen, value, recvOK
+	}
+
+	// find client we received a signal for. If client.done was closed, then
+	// we have to remove the client only. But if closeRef did trigger the signal, then
+	// we have to propagate the async close to the client.
+	// In either case, the client will be removed
+
+	i := (chosen - 1) / 2
+	isSig := (chosen & 1) == 1
+	if isSig {
+		client := (*clients)[i]
+		client.Close()
+	}
+
+	// remove:
+	last := len(*clients) - 1
+	ch1 := i*2 + 1
+	ch2 := ch1 + 1
+	lastCh1 := last*2 + 1
+	lastCh2 := lastCh1 + 1
+
+	(*clients)[i], (*clients)[last] = (*clients)[last], nil
+	(*channels)[ch1], (*channels)[lastCh1] = (*channels)[lastCh1], reflect.SelectCase{}
+	(*channels)[ch2], (*channels)[lastCh2] = (*channels)[lastCh2], reflect.SelectCase{}
+
+	*clients = (*clients)[:last]
+	*channels = (*channels)[:lastCh1]
+	if cap(*clients) > 10 && len(*clients) <= cap(*clients)/2 {
+		clientsTmp := make([]*client, len(*clients))
+		copy(clientsTmp, *clients)
+		clients = &clientsTmp
+
+		channelsTmp := make([]reflect.SelectCase, len(*channels))
+		copy(channelsTmp, *channels)
+		channels = &channelsTmp
+	}
+
+	return chosen, value, recvOK
+}
+
+type propagationWorker struct{}
 
 func (p *Pipeline) runSignalPropagation() {
 	var channels []reflect.SelectCase
@@ -321,7 +372,8 @@ func (p *Pipeline) runSignalPropagation() {
 	})
 
 	for {
-		chosen, recv, recvOK := reflect.Select(channels)
+		// recvOk = false means the channel was closed.
+		chosen, recv, recvOK := p.signalPropagationWorker(&channels, &clients)
 		if chosen == 0 {
 			if !recvOK {
 				// sigNewClient was closed
@@ -343,41 +395,6 @@ func (p *Pipeline) runSignalPropagation() {
 				clients = append(clients, client)
 			}
 			continue
-		}
-
-		// find client we received a signal for. If client.done was closed, then
-		// we have to remove the client only. But if closeRef did trigger the signal, then
-		// we have to propagate the async close to the client.
-		// In either case, the client will be removed
-
-		i := (chosen - 1) / 2
-		isSig := (chosen & 1) == 1
-		if isSig {
-			client := clients[i]
-			client.Close()
-		}
-
-		// remove:
-		last := len(clients) - 1
-		ch1 := i*2 + 1
-		ch2 := ch1 + 1
-		lastCh1 := last*2 + 1
-		lastCh2 := lastCh1 + 1
-
-		clients[i], clients[last] = clients[last], nil
-		channels[ch1], channels[lastCh1] = channels[lastCh1], reflect.SelectCase{}
-		channels[ch2], channels[lastCh2] = channels[lastCh2], reflect.SelectCase{}
-
-		clients = clients[:last]
-		channels = channels[:lastCh1]
-		if cap(clients) > 10 && len(clients) <= cap(clients)/2 {
-			clientsTmp := make([]*client, len(clients))
-			copy(clientsTmp, clients)
-			clients = clientsTmp
-
-			channelsTmp := make([]reflect.SelectCase, len(channels))
-			copy(channelsTmp, channels)
-			channels = channelsTmp
 		}
 	}
 }
