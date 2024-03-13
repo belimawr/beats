@@ -312,14 +312,28 @@ func (p *Pipeline) registerSignalPropagation(c *client) {
 	// That's the real deal. This function just needs to send on this channel
 	p.sigNewClient <- c
 }
-func (p *Pipeline) signalPropagationWorker(channels *[]reflect.SelectCase, clients *[]*client) (int, reflect.Value, bool) {
-	// for {
-	chosen, value, recvOK := reflect.Select(*channels)
+
+type selectReturn struct {
+	workerID int
+	chosen   int
+	recv     reflect.Value
+	recvOK   bool
+}
+
+func (p *Pipeline) signalPropagationWorker(c chan selectReturn, channels *[]reflect.SelectCase, clients *[]*client) {
+	chosen, recv, recvOK := reflect.Select(*channels)
 	// fmt.Printf("================================================== [Worker] Chosen: %d, Value Received: %t\n", chosen, recvOK)
 
 	// The first element is a channel to receive clients, we do not touch it.
+	// TODO: Remove it once this is an independent worker
 	if chosen == 0 {
-		return chosen, value, recvOK
+		c <- selectReturn{
+			chosen: chosen,
+			recv:   recv,
+			recvOK: recvOK,
+		}
+		// return chosen, recv, recvOK
+		return
 	}
 
 	// find client we received a signal for. If client.done was closed, then
@@ -357,10 +371,13 @@ func (p *Pipeline) signalPropagationWorker(channels *[]reflect.SelectCase, clien
 		channels = &channelsTmp
 	}
 
-	return chosen, value, recvOK
+	c <- selectReturn{
+		chosen: chosen,
+		recv:   recv,
+		recvOK: recvOK,
+	}
+	// return chosen, recv, recvOK
 }
-
-type propagationWorker struct{}
 
 func (p *Pipeline) runSignalPropagation() {
 	var channels []reflect.SelectCase
@@ -371,9 +388,16 @@ func (p *Pipeline) runSignalPropagation() {
 		Chan: reflect.ValueOf(p.sigNewClient),
 	})
 
+	c := make(chan selectReturn)
 	for {
 		// recvOk = false means the channel was closed.
-		chosen, recv, recvOK := p.signalPropagationWorker(&channels, &clients)
+		// chosen, recv, recvOK := p.signalPropagationWorker(&channels, &clients)
+		go p.signalPropagationWorker(c, &channels, &clients)
+		d := <-c
+		chosen := d.chosen
+		recv := d.recv
+		recvOK := d.recvOK
+
 		if chosen == 0 {
 			if !recvOK {
 				// sigNewClient was closed
