@@ -313,100 +313,26 @@ func (p *Pipeline) registerSignalPropagation(c *client) {
 	p.sigNewClient <- c
 }
 
-type selectReturn struct {
-	workerID int
-	chosen   int
-	recv     reflect.Value
-	recvOK   bool
-}
+func (p *propagationWorker) signalPropagationWorker() {
+	p.running.Store(true)
+	defer p.running.Store(false)
+	defer fmt.Println("========== Propagation worker DONE")
 
-func (p *Pipeline) signalPropagationWorker(c chan selectReturn, channels *[]reflect.SelectCase, clients *[]*client) {
-	chosen, recv, recvOK := reflect.Select(*channels)
-	// fmt.Printf("================================================== [Worker] Chosen: %d, Value Received: %t\n", chosen, recvOK)
-
-	// The first element is a channel to receive clients, we do not touch it.
-	// TODO: Remove it once this is an independent worker
-	if chosen == 0 {
-		c <- selectReturn{
-			chosen: chosen,
-			recv:   recv,
-			recvOK: recvOK,
-		}
-		// return chosen, recv, recvOK
-		return
-	}
-
-	// find client we received a signal for. If client.done was closed, then
-	// we have to remove the client only. But if closeRef did trigger the signal, then
-	// we have to propagate the async close to the client.
-	// In either case, the client will be removed
-
-	i := (chosen - 1) / 2
-	isSig := (chosen & 1) == 1
-	if isSig {
-		client := (*clients)[i]
-		client.Close()
-	}
-
-	// remove:
-	last := len(*clients) - 1
-	ch1 := i*2 + 1
-	ch2 := ch1 + 1
-	lastCh1 := last*2 + 1
-	lastCh2 := lastCh1 + 1
-
-	(*clients)[i], (*clients)[last] = (*clients)[last], nil
-	(*channels)[ch1], (*channels)[lastCh1] = (*channels)[lastCh1], reflect.SelectCase{}
-	(*channels)[ch2], (*channels)[lastCh2] = (*channels)[lastCh2], reflect.SelectCase{}
-
-	*clients = (*clients)[:last]
-	*channels = (*channels)[:lastCh1]
-	if cap(*clients) > 10 && len(*clients) <= cap(*clients)/2 {
-		clientsTmp := make([]*client, len(*clients))
-		copy(clientsTmp, *clients)
-		clients = &clientsTmp
-
-		channelsTmp := make([]reflect.SelectCase, len(*channels))
-		copy(channelsTmp, *channels)
-		channels = &channelsTmp
-	}
-
-	c <- selectReturn{
-		chosen: chosen,
-		recv:   recv,
-		recvOK: recvOK,
-	}
-	// return chosen, recv, recvOK
-}
-
-func (p *Pipeline) runSignalPropagation() {
-	var channels []reflect.SelectCase
-	var clients []*client
-
-	channels = append(channels, reflect.SelectCase{
-		Dir:  reflect.SelectRecv,
-		Chan: reflect.ValueOf(p.sigNewClient),
-	})
-
-	c := make(chan selectReturn)
 	for {
-		// recvOk = false means the channel was closed.
-		// chosen, recv, recvOK := p.signalPropagationWorker(&channels, &clients)
-		go p.signalPropagationWorker(c, &channels, &clients)
-		d := <-c
-		chosen := d.chosen
-		recv := d.recv
-		recvOK := d.recvOK
+		fmt.Println("======================================== [Worker] len(channels)", len(p.channels))
+		chosen, recv, recvOK := reflect.Select(p.channels)
+		fmt.Printf("======================================== [Worker] Chosen: %d, Value Received: %t\n", chosen, recvOK)
 
+		// The first element is a channel to receive clients, we do not touch it.
 		if chosen == 0 {
 			if !recvOK {
-				// sigNewClient was closed
+				fmt.Println("======================================== [Worker] Breaking condition")
 				return
 			}
 
 			// new client -> register client for signal propagation.
 			if client := recv.Interface().(*client); client != nil {
-				channels = append(channels,
+				p.channels = append(p.channels,
 					reflect.SelectCase{
 						Dir:  reflect.SelectRecv,
 						Chan: reflect.ValueOf(client.closeRef.Done()),
@@ -416,9 +342,119 @@ func (p *Pipeline) runSignalPropagation() {
 						Chan: reflect.ValueOf(client.done),
 					},
 				)
-				clients = append(clients, client)
+				p.clients = append(p.clients, client)
 			}
+			fmt.Println("======================================== [Worker] New client stored, continuing...")
 			continue
+		}
+
+		// find client we received a signal for. If client.done was closed, then
+		// we have to remove the client only. But if closeRef did trigger the signal, then
+		// we have to propagate the async close to the client.
+		// In either case, the client will be removed
+
+		i := (chosen - 1) / 2
+		isSig := (chosen & 1) == 1
+		if isSig {
+			client := (p.clients)[i]
+			client.Close()
+		}
+
+		// remove:
+		last := len(p.clients) - 1
+		ch1 := i*2 + 1
+		ch2 := ch1 + 1
+		lastCh1 := last*2 + 1
+		lastCh2 := lastCh1 + 1
+
+		(p.clients)[i], (p.clients)[last] = (p.clients)[last], nil
+		(p.channels)[ch1], (p.channels)[lastCh1] = (p.channels)[lastCh1], reflect.SelectCase{}
+		(p.channels)[ch2], (p.channels)[lastCh2] = (p.channels)[lastCh2], reflect.SelectCase{}
+
+		p.clients = (p.clients)[:last]
+		p.channels = (p.channels)[:lastCh1]
+
+		if len(p.clients) == 0 {
+			fmt.Printf("======================================== [Worker][%02d] no more clients, returning\n", p.id)
+			return
+		}
+
+		// Shrink p.clients if needed
+		if cap(p.clients) > 10 && len(p.clients) <= cap(p.clients)/2 {
+			clientsTmp := make([]*client, len(p.clients))
+			copy(clientsTmp, p.clients)
+			p.clients = clientsTmp
+
+			channelsTmp := make([]reflect.SelectCase, len(p.channels))
+			copy(channelsTmp, p.channels)
+			p.channels = channelsTmp
+		}
+	}
+}
+
+type propagationWorker struct {
+	id         int
+	clientChan chan *client
+	channels   []reflect.SelectCase
+	clients    []*client
+	running    atomic.Bool
+}
+
+func makePropagationWorker(id int) *propagationWorker {
+	var channels []reflect.SelectCase
+	var clients []*client
+
+	w := propagationWorker{
+		clientChan: make(chan *client),
+		id:         id,
+		clients:    clients,
+	}
+
+	channels = append(channels, reflect.SelectCase{
+		Dir:  reflect.SelectRecv,
+		Chan: reflect.ValueOf(w.clientChan),
+	})
+
+	w.channels = channels
+
+	return &w
+}
+
+func (p *Pipeline) runSignalPropagation() {
+	max := 5
+	clients := 0
+	workers := []*propagationWorker{}
+	var currentWorker *propagationWorker
+	for {
+		select {
+		case newClient, ok := <-p.sigNewClient:
+			fmt.Println("========== New Client?", ok, newClient)
+			if ok {
+				clients++
+
+				// Decide if we need more workers
+				if len(workers)*max <= clients {
+					// Add a new worker
+					currentWorker = makePropagationWorker(len(workers))
+					go currentWorker.signalPropagationWorker()
+					workers = append(workers, currentWorker)
+					fmt.Println("========== Added worker", currentWorker.id)
+				}
+
+				fmt.Println("========== Sending new Client...")
+				currentWorker.clientChan <- newClient
+				fmt.Println("========== Sending new Client DONE")
+				continue
+			}
+
+			// CORRECT METHOD: Close/finish all workers!
+			for _, w := range workers {
+				fmt.Println("Closing worker", w.id)
+				if w.running.Load() {
+					close(w.clientChan)
+				}
+			}
+			return
 		}
 	}
 }
