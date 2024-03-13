@@ -3,6 +3,7 @@ package pipeline
 import (
 	"context"
 	"fmt"
+	"runtime"
 	"sync"
 	"testing"
 
@@ -26,47 +27,74 @@ func TestTiagoPipelineAccepts66000Clients(t *testing.T) {
 	defer pipeline.Close()
 	ctx, cancel := context.WithCancel(context.Background())
 
-	n := 10 //35000
+	n := 16 //35000
 	clients := []beat.Client{}
 	for i := 0; i < n; i++ {
-		if i%1000 == 0 {
-			fmt.Println(i)
-		}
 		c, err := pipeline.ConnectWith(beat.ClientConfig{
 			CloseRef: ctx,
 		})
 		if err != nil {
 			t.Fatalf("Could not connect to pipeline: %s", err)
 		}
-
-		t.Cleanup(func() { c.Close() })
 		clients = append(clients, c)
 	}
 
-	var wg sync.WaitGroup
-	allPublished := make(chan struct{})
-	wg.Add(1)
-	go func() {
-		defer func() {
-			close(allPublished)
-		}()
-		defer func() {
-			wg.Done()
-		}()
+	// var wg sync.WaitGroup
 
-		for i, c := range clients {
-			c.Publish(beat.Event{
-				Fields: mapstr.M{
-					"count": i,
-				},
-			})
-		}
-	}()
+	// allPublished := make(chan struct{})
+	// wg.Add(1)
+	// go func() {
+	// 	defer func() {
+	// 		close(allPublished)
+	// 	}()
+	// 	defer func() {
+	// 		wg.Done()
+	// 	}()
 
-	<-allPublished
+	// 	for i, c := range clients {
+	// 		c.Publish(beat.Event{
+	// 			Fields: mapstr.M{
+	// 				"count": i,
+	// 			},
+	// 		})
+	// 	}
+	// }()
+
+	// // fmt.Println("+++++ Waiting for events to be published")
+	// <-allPublished
+	// // fmt.Println("+++++ All events published, cancelling")
+	for i, c := range clients {
+		c.Publish(beat.Event{
+			Fields: mapstr.M{
+				"count": i,
+			},
+		})
+	}
+
+	// Close the first 105 clients
+	nn := 6
+	tmpC := clients[:n]
+	clients = clients[nn:]
+
+	fmt.Println("++++++++++ Closing some workers")
+	for _, c := range tmpC {
+		c.Close()
+	}
+	fmt.Println("++++++++++ Closing some workers DONE")
+	//time.Sleep(time.Second / 2)
+	runtime.Gosched()
+	runtime.Gosched()
+
 	cancel()
 
-	wg.Wait()
+	// fmt.Println("+++++ Waiting WG")
+	// wg.Wait()
+	// fmt.Println("+++++ Waiting WG DONE")
+
+	// Make sure all clients are closed
+	for _, c := range clients {
+		c.Close()
+	}
 }
 
 // makeDiscardQueue returns a queue that always discards all events
