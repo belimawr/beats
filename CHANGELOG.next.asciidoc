@@ -104,6 +104,7 @@ fields added to events containing the Beats version. {pull}37553[37553]
 - Fix HTTPJSON handling of empty object bodies in POST requests. {issue}33961[33961] {pull}38290[38290]
 - Fix PEM key validation for CEL and HTTPJSON inputs. {pull}38405[38405]
 - Fix filebeat gcs input panic {pull}38407[38407]
+- Fix `clean_removed` on Filestream input. {issue}36761[36761] {pull}38488[38488]
 
 *Heartbeat*
 
