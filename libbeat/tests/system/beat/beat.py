@@ -292,6 +292,7 @@ class TestCase(unittest.TestCase, ComposeMixin):
             args.extend(extra_args)
 
         proc = Proc(args, os.path.join(self.working_dir, output), env)
+        print("==================================================", args, env)
         proc.start()
         return proc
 

@@ -117,7 +117,7 @@ func loadFilter(p *seccomp.Policy) {
 
 	log.Debugw("Loading syscall filter", "seccomp_filter", filter)
 	if err := seccomp.LoadFilter(filter); err != nil {
-		log.Warn("Syscall filter could not be installed", "error", err,
+		log.Warnw("Syscall filter could not be installed", "error", err,
 			"seccomp_filter", filter)
 		return
 	}
