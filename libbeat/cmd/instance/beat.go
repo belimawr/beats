@@ -70,6 +70,7 @@ import (
 	"github.com/elastic/beats/v7/libbeat/publisher/processing"
 	"github.com/elastic/beats/v7/libbeat/publisher/queue/diskqueue"
 	"github.com/elastic/beats/v7/libbeat/version"
+	"github.com/elastic/beats/v7/libotel"
 	"github.com/elastic/elastic-agent-libs/config"
 	"github.com/elastic/elastic-agent-libs/file"
 	"github.com/elastic/elastic-agent-libs/filewatcher"
@@ -615,14 +616,18 @@ func (b *Beat) createBeater(bt beat.Creator) (beat.Beater, error) {
 		Processors:     b.processors,
 		InputQueueSize: b.InputQueueSize,
 	}
+
+	// HERE the publishing pipeline is loaded
 	publisher, err = pipeline.LoadWithSettings(b.Info, monitors, b.Config.Pipeline, outputFactory, settings)
 	if err != nil {
 		return nil, fmt.Errorf("error initializing publisher: %w", err)
 	}
 
-	b.Registry.MustRegisterOutput(b.makeOutputReloader(publisher.OutputReloader()))
+	//b.Registry.MustRegisterOutput(b.makeOutputReloader(publisher.OutputReloader()))
+	b.Registry.MustRegisterOutput(libotel.OutputReloader{})
 
 	b.Publisher = publisher
+	b.Publisher = libotel.NewPipeline()
 	beater, err := bt(&b.Beat, sub)
 	if err != nil {
 		return nil, err
