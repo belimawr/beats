@@ -298,9 +298,14 @@ func (b *BeatProc) stopNonsynced() {
 	if err := b.Process.Signal(os.Interrupt); err != nil {
 		if errors.Is(err, os.ErrProcessDone) {
 			return
+		} else if strings.Contains(err.Error(), "not supported by windows") {
+			err = b.Process.Kill()
 		}
-		b.t.Fatalf("could not send interrupt signal to process with PID: %d, err: %s",
-			b.Process.Pid, err)
+
+		if err != nil {
+			b.t.Fatalf("could not send interrupt signal to process with PID: %d, err: %s",
+				b.Process.Pid, err)
+		}
 	}
 
 	if !b.waitingMutex.TryLock() {

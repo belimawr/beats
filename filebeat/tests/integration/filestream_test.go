@@ -27,6 +27,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"text/template"
@@ -651,6 +652,10 @@ func TestFilestreamIDMigrationDoesNotMigrateFileIdentity(t *testing.T) {
 	// Wait for the registry clean up message
 	msg := fmt.Sprintf("Identifier from '%s' does not match, won't migrate state", logFiles[0])
 	filebeat.WaitForLogs(msg, 5*time.Second, "ID migration was not skipped because of different file identity")
+	if t.Failed() {
+		t.Logf("did not find '%s'", msg)
+		fmt.Printf("====================%s====================\n", msg)
+	}
 	filebeat.Stop()
 
 	assertRegistry(
@@ -737,6 +742,9 @@ func getMigrateIDConfig(t *testing.T, vars map[string]string, tmplPath string) s
 
 func waitForEOF(t *testing.T, filebeat *integration.BeatProc, files []string) {
 	for _, path := range files {
+		if runtime.GOOS == "windows" {
+			path = strings.Replace(path, `\`, `\\`, -1)
+		}
 		eofMsg := fmt.Sprintf("End of file reached: %s; Backoff now.", path)
 
 		require.Eventuallyf(
