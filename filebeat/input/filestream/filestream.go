@@ -157,7 +157,7 @@ func (f *logFile) startFileMonitoringIfNeeded() {
 		err := f.tg.Go(func(ctx context.Context) error {
 			f.periodicStateCheck(ctx)
 			return nil
-		})
+		}, "startFileMonitoringIfNeeded, periodicCheck")
 		if err != nil {
 			f.log.Errorf("failed to start file monitoring: %v", err)
 		}
@@ -167,7 +167,7 @@ func (f *logFile) startFileMonitoringIfNeeded() {
 		err := f.tg.Go(func(ctx context.Context) error {
 			f.closeIfTimeout(ctx)
 			return nil
-		})
+		}, "startFileMonitoringIfNeeded closeIfTimeout")
 		if err != nil {
 			f.log.Errorf("failed to schedule a file close: %v", err)
 		}

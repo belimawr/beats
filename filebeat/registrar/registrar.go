@@ -142,6 +142,8 @@ func (r *Registrar) Run() {
 		}
 	}()
 
+	// defer fmt.Println("#################### Registrar.Run done. Store must be closed")
+
 	var (
 		timer  *time.Timer
 		flushC <-chan time.Time

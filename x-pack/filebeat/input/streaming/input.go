@@ -51,7 +51,7 @@ func Plugin(log *logp.Logger, store statestore.States) v2.Plugin {
 		Deprecated: false,
 		Info:       "Streaming Input",
 		Doc:        "Collect data from streaming data sources",
-		Manager:    NewInputManager(log, store),
+		Manager:    NewInputManager(log, store, inputName),
 	}
 }
 
@@ -62,7 +62,7 @@ func PluginWebsocketAlias(log *logp.Logger, store statestore.States) v2.Plugin {
 		Deprecated: false,
 		Info:       "Websocket Input",
 		Doc:        "Collect data from websocket data sources",
-		Manager:    NewInputManager(log, store),
+		Manager:    NewInputManager(log, store, "websocket"),
 	}
 }
 

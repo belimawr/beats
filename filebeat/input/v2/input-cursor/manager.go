@@ -133,6 +133,9 @@ func (cim *InputManager) Init(group unison.Group) error {
 	err := group.Go(func(canceler context.Context) error {
 		waitRunning <- struct{}{}
 		defer cim.shutdown()
+		defer func() {
+			fmt.Println("#################### Release:", cim.Type, "cleaner shutdown")
+		}()
 		defer store.Release()
 		interval := cim.StateStore.CleanupInterval()
 		if interval <= 0 {
@@ -140,7 +143,7 @@ func (cim *InputManager) Init(group unison.Group) error {
 		}
 		cleaner.run(canceler, store, interval)
 		return nil
-	})
+	}, cim.Type)
 	if err != nil {
 		store.Release()
 		cim.shutdown()

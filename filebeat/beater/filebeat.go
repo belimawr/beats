@@ -291,7 +291,9 @@ func (fb *Filebeat) Run(b *beat.Beat) error {
 	// Use context, like normal people do, hooking up to the beat.done channel
 	ctx, cn := context.WithCancel(context.Background())
 	go func() {
-		<-fb.done
+		fb.logger.Info("==============================  Waiting on fb.done")
+		<-fb.done // this channel is never closed
+		fb.logger.Info("==============================  Waiting on fb.done ========== DONE")
 		cn()
 	}()
 
@@ -300,7 +302,11 @@ func (fb *Filebeat) Run(b *beat.Beat) error {
 		fb.logger.Errorf("Failed to open state store: %+v", err)
 		return err
 	}
-	defer stateStore.Close()
+	defer func() {
+		fb.logger.Info("============================== CLOSING STATE STORE")
+		stateStore.Close()
+		fb.logger.Info("==============================  STATE STORE CLOSED ==========")
+	}()
 
 	// If notifier is set, configure the listener for output configuration
 	// The notifier passes the elasticsearch output configuration down to the Elasticsearch backed state storage
@@ -369,10 +375,16 @@ func (fb *Filebeat) Run(b *beat.Beat) error {
 
 	var inputTaskGroup unison.TaskGroup
 	defer func() {
-		_ = inputTaskGroup.Stop()
+		fmt.Println("================================================== Stopping inputTaskGroup")
+		if err := inputTaskGroup.Stop(); err != nil {
+			fmt.Println("================================================== ERROR:", err)
+		}
 	}()
 
 	// Store needs to be fully configured at this point
+	// ========================================================
+	// This initialises filestream input manager
+	// Shutdown is in the task group passed here
 	if err := v2InputLoader.Init(&inputTaskGroup); err != nil {
 		fb.logger.Errorf("Failed to initialize the input managers: %v", err)
 		return err
@@ -440,7 +452,7 @@ func (fb *Filebeat) Run(b *beat.Beat) error {
 	if err != nil {
 		crawler.Stop()
 		cancelPipelineFactoryCtx()
-		return fmt.Errorf("Failed to start crawler: %w", err) //nolint:staticcheck //Keep old behavior
+		return fmt.Errorf("Failed to start crawler: %w", err) //nolint:staticcheck //Keep old behavior - RETURNS HERE
 	}
 
 	// If run once, add crawler completion check as alternative to done signal
@@ -532,11 +544,14 @@ func (fb *Filebeat) Run(b *beat.Beat) error {
 }
 
 // Stop is called on exit to stop the crawling, spooling and registration processes.
-func (fb *Filebeat) Stop() {
-	fb.logger.Info("Stopping filebeat")
+func (fb *Filebeat) Stop() { // never called when FB hangs
+	fb.logger.Info("Stopping filebeat ==================================================")
 
 	// Stop Filebeat
-	fb.stopOnce.Do(func() { close(fb.done) })
+	fb.stopOnce.Do(func() {
+		fb.logger.Info("============================== CLOSE fb.done")
+		close(fb.done)
+	})
 }
 
 // Create a new pipeline loader (es client) factory

@@ -129,7 +129,7 @@ func (cim *InputManager) Init(group unison.Group) error {
 		}
 		cleaner.run(canceler, store, interval)
 		return nil
-	})
+	}, "input-logfile.(*InputManager).Init")
 	if err != nil {
 		store.Release()
 		cim.shutdown()

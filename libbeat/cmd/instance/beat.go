@@ -512,6 +512,7 @@ func (b *Beat) launch(settings Settings, bt beat.Creator) error {
 	var once sync.Once
 	stopBeat := func() {
 		once.Do(func() {
+			b.Info.Logger.Info("============================== STOP Beat")
 			b.Instrumentation.Tracer().Close()
 			// If the publisher has a Close() method, call it before stopping the beater.
 			if c, ok := b.Publisher.(io.Closer); ok {

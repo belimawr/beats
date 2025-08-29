@@ -111,7 +111,7 @@ func (l *Listener) Start() error {
 		defer connCancel()
 
 		return l.connectAndRun(ctxtool.FromCanceller(connCtx), conn)
-	})
+	}, "dgram.(*Listener).Start")
 	return nil
 }
 

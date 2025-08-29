@@ -64,7 +64,7 @@ func newUpdateWriter(store *store, ch *updateChan) *updateWriter {
 	err := w.tg.Go(func(ctx context.Context) error {
 		w.run(ctx)
 		return nil
-	})
+	}, "newUpdateWriter")
 	if err != nil {
 		store.log.Errorf("failed to schedule the update writer routine: %v", err)
 	}

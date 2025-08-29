@@ -18,6 +18,7 @@
 package cursor
 
 import (
+	"fmt"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -41,6 +42,7 @@ type store struct {
 	refCount        concert.RefCount
 	persistentStore *statestore.Store
 	ephemeralStore  *states
+	inputName       string
 }
 
 // states stores resource states in memory. When a cursor for an input is updated,
@@ -131,10 +133,15 @@ func openStore(log *logp.Logger, statestore statestore.States, prefix string, in
 	ok := false
 
 	log.Debugf("input-cursor::openStore: prefix: %v inputID: %s", prefix, inputID)
+	fmt.Println("-------------------- StoreFor:    ", prefix)
 	persistentStore, err := statestore.StoreFor(prefix)
+	// fmt.Println("-------------------- StoreFor: ", prefix)
 	if err != nil {
 		return nil, err
 	}
+	// if prefix == "streaming" {
+	// 	debug.PrintStack()
+	// }
 	defer cleanup.IfNot(&ok, func() { persistentStore.Close() })
 	persistentStore.SetID(inputID)
 
@@ -148,12 +155,18 @@ func openStore(log *logp.Logger, statestore statestore.States, prefix string, in
 		log:             log,
 		persistentStore: persistentStore,
 		ephemeralStore:  states,
+		inputName:       prefix,
 	}, nil
 }
 
 func (s *store) Retain() { s.refCount.Retain() }
 func (s *store) Release() {
+	fmt.Println("#################### Release:", s.inputName)
+	// if s.inputName == "streaming" {
+	// 	debug.PrintStack()
+	// }
 	if s.refCount.Release() {
+		fmt.Println("#################### Release: closeStore ", s.inputName)
 		closeStore(s)
 	}
 }

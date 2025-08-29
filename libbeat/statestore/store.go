@@ -18,6 +18,8 @@
 package statestore
 
 import (
+	"fmt"
+	"runtime"
 	"sync/atomic"
 	"time"
 
@@ -84,13 +86,28 @@ func (s *Store) SetID(id string) {
 // Close deactivates the current store. No new transacation can be generated.
 // Already active transaction will continue to function until Closed.
 // The backing store will be closed once all stores and active transactions have been closed.
+// Filestream input manager calls this on its store close process,
+// the InputManager.shutdown calls this indirectly
 func (s *Store) Close() error {
+	// fmt.Println("============================== Store.Close", s.shared.name)
+	pc, file, no, ok := runtime.Caller(2)
+	details := runtime.FuncForPC(pc)
+
+	// pc2, _, _, ok2 := runtime.Caller(3)
+	// details2 := runtime.FuncForPC(pc2)
+	if ok {
+		// if ok2 {
+		// 	fmt.Printf("==================== Close from    %s:%d %s -- %s\n", file, no, details.Name(), details2.Name())
+		// } else {
+		fmt.Printf("==================== Close from    %s:%d %s\n", file, no, details.Name())
+		// }
+	}
+
 	if err := s.active.Add(1); err != nil {
 		return &ErrorClosed{operation: "store/close", name: s.shared.name}
 	}
 	s.active.Close()
 	s.active.Done()
-
 	s.active.Wait()
 	return s.shared.Release()
 }
@@ -175,9 +192,12 @@ func (s *Store) Each(fn func(string, ValueDecoder) (bool, error)) error {
 
 func (s *sharedStore) Retain() {
 	s.refCount.Add(1)
+	// fmt.Println("-------------------- libbeat sharedStore.Retain, refCount:", s.refCount.Add(1))
 }
 
 func (s *sharedStore) Release() error {
+	// refCount := s.refCount.Add(-1)
+	// fmt.Println("-------------------- libbeat sharedStore.Release, refCount:", refCount)
 	if s.refCount.Add(-1) == 0 && s.tryUnregister() {
 		return s.backend.Close()
 	}
@@ -188,12 +208,15 @@ func (s *sharedStore) Release() error {
 // if the store has been retained in the meantime. True is returned if the store
 // can be closed for sure.
 func (s *sharedStore) tryUnregister() bool {
+	fmt.Println("******************** tryUnregister try lock")
 	s.reg.mu.Lock()
+	fmt.Println("******************** tryUnregister lock accquired")
 	defer s.reg.mu.Unlock()
 	if s.refCount.Load() > 0 {
+		fmt.Println("******************** tryUnregister refCount > 0")
 		return false
 	}
-
+	fmt.Println("******************** tryUnregister refCount <= 0, closing store")
 	s.reg.unregisterStore(s)
 	return true
 }

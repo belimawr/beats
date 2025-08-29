@@ -18,6 +18,8 @@
 package statestore
 
 import (
+	"fmt"
+	"runtime"
 	"sync"
 
 	"github.com/elastic/beats/v7/libbeat/statestore/backend"
@@ -49,13 +51,17 @@ func NewRegistry(backend backend.Registry) *Registry {
 
 // Close closes the backend storage. Close blocks until all stores in use are closed.
 func (r *Registry) Close() error {
-	r.wg.Wait() // wait for all stores being closed
+	// The real problem is here, this wg is never done
+	fmt.Println("============================== Registry wg.Wait")
+	r.wg.Wait() // wait for all stores being closed - THIS never finishes
+	fmt.Println("============================== Registry wg.Wait DONE")
 	return r.backend.Close()
 }
 
 // Get opens a shared store. A store is closed and released only after all it's
 // users have closed the store.
 func (r *Registry) Get(name string) (*Store, error) {
+	// fmt.Println("-------------------- libbeat Registry.Get: ", name)
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -70,9 +76,16 @@ func (r *Registry) Get(name string) (*Store, error) {
 		defer shared.Release()
 
 		r.active[name] = shared
+		fmt.Println("============================== Store wg.Add")
 		r.wg.Add(1)
 	}
 
+	// fmt.Println("-------------------- libbeat Registry.Get: ", name, "calling newStore")
+	pc, file, no, ok := runtime.Caller(2)
+	details := runtime.FuncForPC(pc)
+	if ok {
+		fmt.Printf("-------------------- NewStore from %s:%d %s\n", file, no, details.Name())
+	}
 	return newStore(shared), nil
 }
 

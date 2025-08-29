@@ -23,12 +23,12 @@ type InputManager struct {
 
 var _ v2.InputManager = InputManager{}
 
-func NewInputManager(log *logp.Logger, store statestore.States) InputManager {
+func NewInputManager(log *logp.Logger, store statestore.States, kind string) InputManager {
 	return InputManager{
 		cursor: &inputcursor.InputManager{
 			Logger:     log,
 			StateStore: store,
-			Type:       inputName,
+			Type:       kind,
 			Configure:  cursorConfigure,
 		},
 	}
