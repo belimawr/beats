@@ -116,6 +116,18 @@ func Factory(canceller input.Canceler, logger *logp.Logger, binary string, args 
 							pathError.Path == "|0" &&
 							pathError.Err.Error() == "file already closed" {
 							logger.Debugf("cannot read from journalctl stdout: '%s'", err)
+							for {
+								data, err := reader.ReadBytes('\n')
+								if errors.Is(err, io.EOF) {
+									return
+								}
+								select {
+								case <-jctl.canceler.Done():
+									return
+								case jctl.dataChan <- data:
+									logger.Debug("===== DATA:", string(data))
+								}
+							}
 						} else {
 							logError = true
 						}
@@ -133,6 +145,7 @@ func Factory(canceller input.Canceler, logger *logp.Logger, binary string, args 
 			case <-jctl.canceler.Done():
 				return
 			case jctl.dataChan <- data:
+				logger.Debug("===== DATA:", string(data))
 			}
 		}
 	}()
