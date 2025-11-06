@@ -6,7 +6,10 @@ package azureblobstorage
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -152,7 +155,11 @@ func Test_OAuth2(t *testing.T) {
 
 			var g errgroup.Group
 			g.Go(func() error {
-				return input.Run(ctx, chanClient)
+				if err := input.Run(ctx, chanClient); !errors.Is(err, context.Canceled) {
+					t.Errorf("did not expect input.Run to return an error: %s", err)
+				}
+
+				return err
 			})
 
 			var timeout *time.Timer
