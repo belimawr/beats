@@ -11,7 +11,6 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"slices"
 	"testing"
 
 	"golang.org/x/sys/windows"
@@ -64,11 +63,11 @@ func TestMkdirAllReservedNames(t *testing.T) {
 	base := t.TempDir()
 	tests := []struct {
 		name    string
-		wantErr []error
+		wantErr error
 	}{
-		{"CON", []error{fs.ErrNotExist}},
-		{"PRN", []error{windows.ERROR_DIRECTORY, windows.ERROR_PATH_NOT_FOUND}},
-		{"AUX", []error{windows.ERROR_DIRECTORY, windows.ERROR_PATH_NOT_FOUND}},
+		{"CON", fs.ErrNotExist},
+		{"PRN", windows.ERROR_DIRECTORY},
+		{"AUX", windows.ERROR_DIRECTORY},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -77,8 +76,8 @@ func TestMkdirAllReservedNames(t *testing.T) {
 			if err == nil {
 				t.Fatal("expected error from MkdirAll, got nil")
 			}
-			if !slices.ContainsFunc(test.wantErr, func(e error) bool { return errors.Is(err, e) }) {
-				t.Fatalf("MkdirAll(%q) err = %v; want in %v", p, err, test.wantErr)
+			if !errors.Is(err, test.wantErr) {
+				t.Fatalf("MkdirAll(%q) err = %v; want %v", p, err, test.wantErr)
 			}
 		})
 	}
