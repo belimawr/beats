@@ -31,6 +31,15 @@ func NewConfigFromProto(f *proto.Features) (*conf.C, error) {
 		return nil, fmt.Errorf("unable to parse feature flags message into beat configuration: %w", err)
 	}
 
+	sourceMap := f.Source.AsMap()
+	if agentAny, ok := sourceMap["agent"]; ok {
+		if agentMap, ok := agentAny.(map[string]any); ok {
+			if err := c.Merge(agentMap); err != nil {
+				return nil, fmt.Errorf("cannot merge features: %w", err)
+			}
+		}
+	}
+
 	_, err = c.Remove("features.source", -1)
 	if err != nil {
 		return nil, fmt.Errorf("unable to convert feature flags message to beat configuration: %w", err)

@@ -118,5 +118,6 @@ func LogInputRunFilestream() bool {
 }
 
 func (f *fflags) SetLogInputRunFilestream(v bool) {
+	fmt.Println("==================== Setting logRunAsFilestream: ", v)
 	f.logRunAsFilestream.Store(v)
 }

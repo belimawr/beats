@@ -621,8 +621,25 @@ func (cm *BeatV2Manager) reload(units map[unitKey]*agentUnit) {
 				unitErrors[unit.ID()] = append(unitErrors[unit.ID()], err)
 			}
 
+			prevLogRunAsFilestream := features.LogInputRunFilestream()
+
 			if err := features.UpdateFromConfig(featuresCfg); err != nil {
 				unitErrors[unit.ID()] = append(unitErrors[unit.ID()], err)
+			}
+
+			cm.logger.Infof("========== prevLogRunAsFilestream: %t", prevLogRunAsFilestream)
+			cm.logger.Infof("========== cm.lastBeatFeaturesCfg: %v", cm.lastBeatFeaturesCfg)
+			if cm.lastBeatFeaturesCfg != nil {
+				if prevLogRunAsFilestream != features.LogInputRunFilestream() {
+					// If the 'log_input_run_as_filestream' feature flag has changed,
+					// we need to restart the beat
+					cm.logger.Info(
+						"beat is restarting because feature flag 'log_input_run_as_filestream' has changed",
+					)
+					_ = unit.UpdateState(status.Stopping, "Restarting", nil)
+					cm.stopBeat()
+					return
+				}
 			}
 
 			cm.lastBeatFeaturesCfg = featuresCfg
