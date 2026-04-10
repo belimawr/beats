@@ -254,6 +254,8 @@ func (fb *Filebeat) Run(b *beat.Beat) error {
 	var err error
 	config := fb.config
 
+	defer fb.logger.Info("Filebeat stopped! DONE")
+
 	if b.Manager != nil {
 		b.Manager.RegisterDiagnosticHook("input_metrics", "Metrics from active inputs.",
 			"input_metrics.json", "application/json", func() []byte {
