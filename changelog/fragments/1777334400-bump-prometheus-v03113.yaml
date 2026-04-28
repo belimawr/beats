@@ -1,0 +1,5 @@
+kind: enhancement
+
+summary: Bump github.com/prometheus/prometheus to v0.311.3 and refresh related module dependencies.
+
+component: metricbeat
