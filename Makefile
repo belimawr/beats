@@ -89,6 +89,7 @@ check:
 	@$(MAKE) update
 	@$(MAKE) check-headers
 	@$(MAKE) check-go
+	@$(MAKE) notice
 	@$(MAKE) check-no-changes
 
 ## check : Run some checks similar to what the default check validation runs in the CI.
