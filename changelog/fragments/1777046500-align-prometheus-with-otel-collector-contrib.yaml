@@ -1,0 +1,3 @@
+kind: bug-fix
+summary: Align Prometheus module with OpenTelemetry Collector contrib for beats-otel-collector builds
+component: otel
