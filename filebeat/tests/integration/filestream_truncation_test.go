@@ -67,7 +67,7 @@ logging:
     enabled: false
 `
 
-var truncationFingerprintCopyTruncateCfg = `
+var truncationFingerprintCfg = `
 filebeat.inputs:
   - type: filestream
     id: a-unique-filestream-input-id
@@ -79,8 +79,6 @@ filebeat.inputs:
       scanner:
         fingerprint.enabled: true
         check_interval: 100ms
-    rotation.external.strategy.copytruncate:
-      suffix_regex: \.\d$
 output:
   file:
     enabled: true
@@ -201,7 +199,7 @@ func TestFilestreamFingerprintCopyTruncate(t *testing.T) {
 	logFile := path.Join(tempDir, "log.log")
 	rotatedLogFile := logFile + ".1"
 	filebeat.WriteConfigFile(
-		fmt.Sprintf(truncationFingerprintCopyTruncateCfg, logFile, tempDir, tempDir))
+		fmt.Sprintf(truncationFingerprintCfg, logFile, tempDir, tempDir))
 
 	const (
 		beforeTruncateLines = 120
