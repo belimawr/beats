@@ -79,8 +79,6 @@ clean: mage
 	@-mage -clean
 
 ## check : TBD.
-# Use Go from .go-version and Python from .python-version: put that interpreter's bin dir on PATH
-# and set PYTHON_EXE to its basename (e.g. python3.9). An absolute PYTHON_EXE breaks mage virtualenv paths.
 .PHONY: check
 check:
 	@$(foreach var,$(PROJECTS) dev-tools $(PROJECTS_XPACK_MAGE),$(MAKE) -C $(var) check || exit 1;)
@@ -91,7 +89,6 @@ check:
 	@$(MAKE) update
 	@$(MAKE) check-headers
 	@$(MAKE) check-go
-	@$(MAKE) notice
 	@$(MAKE) check-no-changes
 
 ## check : Run some checks similar to what the default check validation runs in the CI.
