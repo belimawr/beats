@@ -67,6 +67,42 @@ logging:
     enabled: false
 `
 
+var truncationFingerprintCfg = `
+filebeat.inputs:
+  - type: filestream
+    id: a-unique-filestream-input-id
+    enabled: true
+    paths:
+      - %s*
+    file_identity.fingerprint: ~
+    prospector:
+      scanner:
+        fingerprint.enabled: true
+        check_interval: 100ms
+output:
+  file:
+    enabled: true
+    codec.json:
+      pretty: false
+    path: %s
+    filename: "output"
+    rotate_on_startup: true
+queue.mem:
+  flush:
+    timeout: 100ms
+    min_events: 1
+filebeat.registry.flush: 100ms
+path.home: %s
+logging:
+  level: debug
+  selectors:
+    - file_watcher
+    - input.filestream
+    - input.harvester
+  metrics:
+    enabled: false
+`
+
 func TestFilestreamLiveFileTruncation(t *testing.T) {
 	filebeat := integration.NewBeat(
 		t,
@@ -150,6 +186,77 @@ func TestFilestreamOfflineFileTruncation(t *testing.T) {
 
 	// 6. Assert the registry offset is new, smaller file size.
 	assertLastOffset(t, registryLogFile, 250)
+}
+
+func TestFilestreamFingerprintCopyTruncate(t *testing.T) {
+	filebeat := integration.NewBeat(
+		t,
+		"filebeat",
+		"../../filebeat.test",
+	)
+
+	tempDir := filebeat.TempDir()
+	logFile := path.Join(tempDir, "log.log")
+	rotatedLogFile := logFile + ".1"
+	filebeat.WriteConfigFile(
+		fmt.Sprintf(truncationFingerprintCfg, logFile, tempDir, tempDir))
+
+	const (
+		beforeTruncateLines = 120
+		afterTruncateLines  = 40
+		afterUniqueLines    = 7
+	)
+
+	// Use the same prefix before and after truncation to create equal fingerprints
+	// across the copied and truncated files.
+	const samePrefix = "copytruncate-fingerprint"
+	const uniquePrefix = "copytruncate-after-truncate"
+
+	integration.WriteLogFile(t, logFile, beforeTruncateLines, false, samePrefix)
+
+	filebeat.Start()
+	filebeat.WaitLogsContains("End of file reached", 30*time.Second, "Filebeat did not ingest the initial file")
+	filebeat.WaitPublishedEvents(30*time.Second, beforeTruncateLines)
+
+	copyFile(t, logFile, rotatedLogFile)
+
+	if err := os.Truncate(logFile, 0); err != nil {
+		t.Fatalf("could not truncate log file: %s", err)
+	}
+
+	integration.WriteLogFile(t, logFile, afterTruncateLines, true, samePrefix)
+	integration.WriteLogFile(t, logFile, afterUniqueLines, true, uniquePrefix)
+
+	totalExpected := beforeTruncateLines + afterTruncateLines + afterUniqueLines
+	filebeat.WaitPublishedEvents(45*time.Second, totalExpected)
+	filebeat.Stop()
+
+	type event struct {
+		Message string `json:"message"`
+	}
+	events := integration.GetEventsFromFileOutput[event](filebeat, 0, true)
+
+	uniqueAfterTruncateEvents := 0
+	for _, evt := range events {
+		if strings.HasPrefix(evt.Message, uniquePrefix) {
+			uniqueAfterTruncateEvents++
+		}
+	}
+	if uniqueAfterTruncateEvents != afterUniqueLines {
+		t.Fatalf("expected %d events with unique prefix %q, got %d", afterUniqueLines, uniquePrefix, uniqueAfterTruncateEvents)
+	}
+}
+
+func copyFile(t *testing.T, src, dst string) {
+	t.Helper()
+
+	data, err := os.ReadFile(src)
+	if err != nil {
+		t.Fatalf("could not read source file %q: %s", src, err)
+	}
+	if err := os.WriteFile(dst, data, 0o644); err != nil {
+		t.Fatalf("could not write destination file %q: %s", dst, err)
+	}
 }
 
 func assertLastOffset(t *testing.T, path string, offset int) {
