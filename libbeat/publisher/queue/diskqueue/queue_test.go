@@ -100,7 +100,7 @@ func (t testQueue) Close(force bool) error {
 }
 
 func TestIssue32560ReplayLastEventAfterRestart(t *testing.T) {
-	diskQueuePath := fs.TempDir(t)
+	diskQueuePath := fs.TempDir(t, "..", "..", "..", "build", "integration-tests")
 	settings := DefaultSettings()
 	settings.Path = diskQueuePath
 	// Keep segment size small enough to produce multiple segments quickly.
@@ -132,6 +132,7 @@ func TestIssue32560ReplayLastEventAfterRestart(t *testing.T) {
 	run3, err := NewQueue(fileLogger.Logger, nil, settings, nil, &paths.Path{})
 	require.NoError(t, err, "run3 queue should be created successfully")
 	replayedBatch := readBatchWithin(t, run3, 3*time.Second)
+	printBatch(t, replayedBatch)
 	if replayedBatch != nil {
 		marker, _ := replayedBatch.Entry(0).Content.Fields.GetValue("marker")
 		replayedBatch.Done()
@@ -146,6 +147,13 @@ func TestIssue32560ReplayLastEventAfterRestart(t *testing.T) {
 	closeQueueAndWait(t, run3)
 }
 
+func printBatch(t *testing.T, batch queue.Batch[publisher.Event]) {
+	t.Log("====================")
+	for i := range batch.Count() {
+		t.Log(batch.Entry(i).Content.Fields["marker"])
+	}
+	t.Log("====================")
+}
 func publishAndACKSingleEvent(
 	t *testing.T,
 	queueInstance *diskQueue,
@@ -160,6 +168,7 @@ func publishAndACKSingleEvent(
 	require.Equal(t, 1, batch.Count(), "queue should return a single event batch for marker %q", marker)
 	assertEventMarker(t, batch.Entry(0), marker)
 	batch.Done()
+	printBatch(t, batch)
 }
 
 func readBatchWithin(t *testing.T, queueInstance *diskQueue, timeout time.Duration) queue.Batch[publisher.Event] {
