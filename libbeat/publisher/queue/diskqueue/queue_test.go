@@ -32,6 +32,7 @@ import (
 	"github.com/elastic/elastic-agent-libs/logp/logptest"
 	"github.com/elastic/elastic-agent-libs/mapstr"
 	"github.com/elastic/elastic-agent-libs/paths"
+	"github.com/elastic/elastic-agent-libs/testing/fs"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -99,15 +100,15 @@ func (t testQueue) Close(force bool) error {
 }
 
 func TestIssue32560ReplayLastEventAfterRestart(t *testing.T) {
-	diskQueuePath := t.TempDir()
+	diskQueuePath := fs.TempDir(t)
 	settings := DefaultSettings()
 	settings.Path = diskQueuePath
 	// Keep segment size small enough to produce multiple segments quickly.
 	settings.MaxSegmentSize = 4 * 1024
-	logger := logptest.NewTestingLogger(t, "")
+	fileLogger := logptest.NewFileLogger(t, diskQueuePath)
 
 	// Run 1: publish and ACK two events.
-	run1, err := NewQueue(logger, nil, settings, nil, &paths.Path{})
+	run1, err := NewQueue(fileLogger.Logger, nil, settings, nil, &paths.Path{})
 	require.NoError(t, err, "run1 queue should be created successfully")
 	run1Producer := run1.Producer(queue.ProducerConfig{})
 	publishAndACKSingleEvent(t, run1, run1Producer, "event-1")
@@ -116,7 +117,7 @@ func TestIssue32560ReplayLastEventAfterRestart(t *testing.T) {
 	closeQueueAndWait(t, run1)
 
 	// Run 2: reopen queue, publish one event and ACK it.
-	run2, err := NewQueue(logger, nil, settings, nil, &paths.Path{})
+	run2, err := NewQueue(fileLogger.Logger, nil, settings, nil, &paths.Path{})
 	require.NoError(t, err, "run2 queue should be created successfully")
 	run2Producer := run2.Producer(queue.ProducerConfig{})
 	publishAndACKSingleEvent(t, run2, run2Producer, "event-3")
@@ -125,15 +126,23 @@ func TestIssue32560ReplayLastEventAfterRestart(t *testing.T) {
 	assert.GreaterOrEqual(t, segCount, 2, "reproduction precondition requires at least two segment files")
 	closeQueueAndWait(t, run2)
 
-	// Run 3: reopen queue without publishing a new event. The bug reproduces
-	// if the last event from run2 is replayed.
-	run3, err := NewQueue(logger, nil, settings, nil, &paths.Path{})
+	// Run 3: reopen queue without publishing a new event. Correct behavior is
+	// that no event is replayed. On current main this assertion fails, proving
+	// the issue is still present.
+	run3, err := NewQueue(fileLogger.Logger, nil, settings, nil, &paths.Path{})
 	require.NoError(t, err, "run3 queue should be created successfully")
 	replayedBatch := readBatchWithin(t, run3, 3*time.Second)
-	require.NotNil(t, replayedBatch, "expected a replayed batch on restart when multiple segments exist")
-	require.Equal(t, 1, replayedBatch.Count(), "expected exactly one replayed event in reproduction")
-	assertEventMarker(t, replayedBatch.Entry(0), "event-3")
-	replayedBatch.Done()
+	if replayedBatch != nil {
+		marker, _ := replayedBatch.Entry(0).Content.Fields.GetValue("marker")
+		replayedBatch.Done()
+		require.Failf(
+			t,
+			"unexpected replayed event after restart",
+			"found replayed batch with count=%d and first marker=%v",
+			replayedBatch.Count(),
+			marker,
+		)
+	}
 	closeQueueAndWait(t, run3)
 }
 
