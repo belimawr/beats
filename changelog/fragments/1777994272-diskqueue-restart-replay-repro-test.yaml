@@ -1,4 +1,0 @@
-kind: bug-fix
-summary: Add a disk queue regression test reproducing replay of the last event after restart with multiple segments.
-component: filebeat
-issue: https://github.com/elastic/beats/issues/32560
