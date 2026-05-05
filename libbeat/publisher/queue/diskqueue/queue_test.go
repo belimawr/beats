@@ -20,6 +20,9 @@ package diskqueue
 import (
 	"flag"
 	"math/rand/v2"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -27,7 +30,10 @@ import (
 	"github.com/elastic/beats/v7/libbeat/publisher/queue"
 	"github.com/elastic/beats/v7/libbeat/publisher/queue/queuetest"
 	"github.com/elastic/elastic-agent-libs/logp/logptest"
+	"github.com/elastic/elastic-agent-libs/mapstr"
 	"github.com/elastic/elastic-agent-libs/paths"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 var seed int64
@@ -90,4 +96,116 @@ func makeTestQueue() queuetest.QueueFactory {
 func (t testQueue) Close(force bool) error {
 	err := t.diskQueue.Close(force)
 	return err
+}
+
+func TestIssue32560ReplayLastEventAfterRestart(t *testing.T) {
+	diskQueuePath := t.TempDir()
+	settings := DefaultSettings()
+	settings.Path = diskQueuePath
+	// Keep segment size small enough to produce multiple segments quickly.
+	settings.MaxSegmentSize = 4 * 1024
+	logger := logptest.NewTestingLogger(t, "")
+
+	// Run 1: publish and ACK two events.
+	run1, err := NewQueue(logger, nil, settings, nil, &paths.Path{})
+	require.NoError(t, err, "run1 queue should be created successfully")
+	run1Producer := run1.Producer(queue.ProducerConfig{})
+	publishAndACKSingleEvent(t, run1, run1Producer, "event-1")
+	publishAndACKSingleEvent(t, run1, run1Producer, "event-2")
+	run1Producer.Close()
+	closeQueueAndWait(t, run1)
+
+	// Run 2: reopen queue, publish one event and ACK it.
+	run2, err := NewQueue(logger, nil, settings, nil, &paths.Path{})
+	require.NoError(t, err, "run2 queue should be created successfully")
+	run2Producer := run2.Producer(queue.ProducerConfig{})
+	publishAndACKSingleEvent(t, run2, run2Producer, "event-3")
+	run2Producer.Close()
+	segCount := countSegmentFiles(t, diskQueuePath)
+	assert.GreaterOrEqual(t, segCount, 2, "reproduction precondition requires at least two segment files")
+	closeQueueAndWait(t, run2)
+
+	// Run 3: reopen queue without publishing a new event. The bug reproduces
+	// if the last event from run2 is replayed.
+	run3, err := NewQueue(logger, nil, settings, nil, &paths.Path{})
+	require.NoError(t, err, "run3 queue should be created successfully")
+	replayedBatch := readBatchWithin(t, run3, 3*time.Second)
+	require.NotNil(t, replayedBatch, "expected a replayed batch on restart when multiple segments exist")
+	require.Equal(t, 1, replayedBatch.Count(), "expected exactly one replayed event in reproduction")
+	assertEventMarker(t, replayedBatch.Entry(0), "event-3")
+	replayedBatch.Done()
+	closeQueueAndWait(t, run3)
+}
+
+func publishAndACKSingleEvent(
+	t *testing.T,
+	queueInstance *diskQueue,
+	producer queue.Producer[publisher.Event],
+	marker string,
+) {
+	_, ok := producer.Publish(makeDiskQueueTestEvent(marker))
+	require.True(t, ok, "publishing test event %q should succeed", marker)
+
+	batch := readBatchWithin(t, queueInstance, 3*time.Second)
+	require.NotNil(t, batch, "queue should return a batch for marker %q", marker)
+	require.Equal(t, 1, batch.Count(), "queue should return a single event batch for marker %q", marker)
+	assertEventMarker(t, batch.Entry(0), marker)
+	batch.Done()
+}
+
+func readBatchWithin(t *testing.T, queueInstance *diskQueue, timeout time.Duration) queue.Batch[publisher.Event] {
+	type getResult struct {
+		batch queue.Batch[publisher.Event]
+		err   error
+	}
+
+	results := make(chan getResult, 1)
+	go func() {
+		batch, err := queueInstance.Get(1)
+		results <- getResult{batch: batch, err: err}
+	}()
+
+	select {
+	case result := <-results:
+		require.NoError(t, result.err, "reading from queue should not return an error")
+		return result.batch
+	case <-time.After(timeout):
+		return nil
+	}
+}
+
+func closeQueueAndWait(t *testing.T, queueInstance *diskQueue) {
+	err := queueInstance.Close(false)
+	require.NoError(t, err, "closing queue should not return an error")
+
+	select {
+	case <-queueInstance.Done():
+	case <-time.After(5 * time.Second):
+		require.Fail(t, "queue did not close in time", "queue.Done() should close within timeout")
+	}
+}
+
+func assertEventMarker(t *testing.T, event publisher.Event, expectedMarker string) {
+	actualMarker, _ := event.Content.Fields.GetValue("marker")
+	assert.Equal(t, expectedMarker, actualMarker, "unexpected marker in consumed event")
+}
+
+func makeDiskQueueTestEvent(marker string) publisher.Event {
+	return queuetest.MakeEvent(mapstr.M{
+		"marker":  marker,
+		"payload": strings.Repeat("x", 2048),
+	})
+}
+
+func countSegmentFiles(t *testing.T, dir string) int {
+	entries, err := os.ReadDir(dir)
+	require.NoError(t, err, "disk queue directory should be readable")
+
+	count := 0
+	for _, entry := range entries {
+		if !entry.IsDir() && filepath.Ext(entry.Name()) == ".seg" {
+			count++
+		}
+	}
+	return count
 }
