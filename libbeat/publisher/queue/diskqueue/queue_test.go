@@ -139,6 +139,7 @@ func TestIssue32560ReplayLastEventAfterRestart(t *testing.T) {
 	require.NoError(t, err, "run3 queue should be created successfully")
 	replayedBatch := readBatchWithin(t, run3, 3*time.Second)
 	logFilledEvents(t, reg, "run3-after-open")
+	printBatch(t, replayedBatch)
 	if replayedBatch != nil {
 		marker, _ := replayedBatch.Entry(0).Content.Fields.GetValue("marker")
 		replayedBatch.Done()
@@ -183,6 +184,7 @@ func publishAndACKSingleEvent(
 	require.Equal(t, 1, batch.Count(), "queue should return a single event batch for marker %q", marker)
 	assertEventMarker(t, batch.Entry(0), marker)
 	batch.Done()
+	printBatch(t, batch)
 }
 
 func readBatchWithin(t *testing.T, queueInstance *diskQueue, timeout time.Duration) queue.Batch[publisher.Event] {
@@ -240,4 +242,16 @@ func countSegmentFiles(t *testing.T, dir string) int {
 		}
 	}
 	return count
+}
+
+func printBatch(t *testing.T, batch queue.Batch[publisher.Event]) {
+	t.Log("====================")
+	if batch == nil {
+		t.Log("batch is nil")
+		return
+	}
+	for i := range batch.Count() {
+		t.Log(batch.Entry(i).Content.Fields["marker"])
+		t.Log("====================")
+	}
 }
