@@ -31,7 +31,6 @@ import (
 	"github.com/elastic/beats/v7/libbeat/publisher/queue/queuetest"
 	"github.com/elastic/elastic-agent-libs/logp/logptest"
 	"github.com/elastic/elastic-agent-libs/mapstr"
-	"github.com/elastic/elastic-agent-libs/monitoring"
 	"github.com/elastic/elastic-agent-libs/paths"
 	"github.com/elastic/elastic-agent-libs/testing/fs"
 	"github.com/stretchr/testify/assert"
@@ -100,46 +99,43 @@ func (t testQueue) Close(force bool) error {
 	return err
 }
 
-func TestIssue32560ReplayLastEventAfterRestart(t *testing.T) {
+func TestQueueDoesNotReplyLastEventAfterRestart(t *testing.T) {
 	diskQueuePath := fs.TempDir(t, "..", "..", "..", "build", "integration-tests")
 	settings := DefaultSettings()
 	settings.Path = diskQueuePath
 	// Keep segment size small enough to produce multiple segments quickly.
 	settings.MaxSegmentSize = 4 * 1024
+
 	fileLogger := logptest.NewFileLogger(t, diskQueuePath)
-	reg := monitoring.NewRegistry()
-	observer := queue.NewQueueObserver(reg)
 
 	// Run 1: publish and ACK two events.
-	run1, err := NewQueue(fileLogger.Logger, observer, settings, nil, &paths.Path{})
+	run1Queue, err := NewQueue(fileLogger.Logger, nil, settings, nil, &paths.Path{})
 	require.NoError(t, err, "run1 queue should be created successfully")
-	run1Producer := run1.Producer(queue.ProducerConfig{})
-	publishAndACKSingleEvent(t, run1, run1Producer, "event-1")
-	publishAndACKSingleEvent(t, run1, run1Producer, "event-2")
+
+	run1Producer := run1Queue.Producer(queue.ProducerConfig{})
+	publishAndACKSingleEvent(t, run1Queue, run1Producer, "event-1")
+	publishAndACKSingleEvent(t, run1Queue, run1Producer, "event-2")
 	run1Producer.Close()
-	logFilledEvents(t, reg, "run1-before-close")
-	closeQueueAndWait(t, run1)
+	closeQueueAndWait(t, run1Queue)
 
 	// Run 2: reopen queue, publish one event and ACK it.
-	run2, err := NewQueue(fileLogger.Logger, observer, settings, nil, &paths.Path{})
+	run2Queue, err := NewQueue(fileLogger.Logger, nil, settings, nil, &paths.Path{})
 	require.NoError(t, err, "run2 queue should be created successfully")
-	logFilledEvents(t, reg, "run2-after-open")
-	run2Producer := run2.Producer(queue.ProducerConfig{})
-	publishAndACKSingleEvent(t, run2, run2Producer, "event-3")
+
+	run2Producer := run2Queue.Producer(queue.ProducerConfig{})
+	publishAndACKSingleEvent(t, run2Queue, run2Producer, "event-3")
 	run2Producer.Close()
-	logFilledEvents(t, reg, "run2-before-close")
 	segCount := countSegmentFiles(t, diskQueuePath)
 	assert.GreaterOrEqual(t, segCount, 2, "reproduction precondition requires at least two segment files")
-	closeQueueAndWait(t, run2)
+	closeQueueAndWait(t, run2Queue)
 
 	// Run 3: reopen queue without publishing a new event. Correct behavior is
-	// that no event is replayed. On current main this assertion fails, proving
-	// the issue is still present.
-	run3, err := NewQueue(fileLogger.Logger, observer, settings, nil, &paths.Path{})
+	// that no event is replayed. This used to fail with the last event being
+	// replayed.
+	run3Queue, err := NewQueue(fileLogger.Logger, nil, settings, nil, &paths.Path{})
 	require.NoError(t, err, "run3 queue should be created successfully")
-	replayedBatch := readBatchWithin(t, run3, 3*time.Second)
-	logFilledEvents(t, reg, "run3-after-open")
-	printBatch(t, replayedBatch)
+
+	replayedBatch := readBatch(t, run3Queue, 3*time.Second)
 	if replayedBatch != nil {
 		marker, _ := replayedBatch.Entry(0).Content.Fields.GetValue("marker")
 		replayedBatch.Done()
@@ -151,25 +147,9 @@ func TestIssue32560ReplayLastEventAfterRestart(t *testing.T) {
 			marker,
 		)
 	}
-	closeQueueAndWait(t, run3)
+	closeQueueAndWait(t, run3Queue)
 }
 
-func logFilledEvents(t *testing.T, reg *monitoring.Registry, stage string) {
-	t.Helper()
-
-	entry := reg.Get("queue.filled.events")
-	if entry == nil {
-		t.Logf("%s queue.filled.events=<missing>", stage)
-		return
-	}
-
-	value, ok := entry.(*monitoring.Uint)
-	if !ok {
-		t.Logf("%s queue.filled.events=<unexpected type %T>", stage, entry)
-		return
-	}
-	t.Logf("%s queue.filled.events=%d", stage, value.Get())
-}
 func publishAndACKSingleEvent(
 	t *testing.T,
 	queueInstance *diskQueue,
@@ -179,15 +159,14 @@ func publishAndACKSingleEvent(
 	_, ok := producer.Publish(makeDiskQueueTestEvent(marker))
 	require.True(t, ok, "publishing test event %q should succeed", marker)
 
-	batch := readBatchWithin(t, queueInstance, 3*time.Second)
+	batch := readBatch(t, queueInstance, 3*time.Second)
 	require.NotNil(t, batch, "queue should return a batch for marker %q", marker)
 	require.Equal(t, 1, batch.Count(), "queue should return a single event batch for marker %q", marker)
 	assertEventMarker(t, batch.Entry(0), marker)
 	batch.Done()
-	printBatch(t, batch)
 }
 
-func readBatchWithin(t *testing.T, queueInstance *diskQueue, timeout time.Duration) queue.Batch[publisher.Event] {
+func readBatch(t *testing.T, queueInstance *diskQueue, timeout time.Duration) queue.Batch[publisher.Event] {
 	type getResult struct {
 		batch queue.Batch[publisher.Event]
 		err   error
@@ -220,13 +199,13 @@ func closeQueueAndWait(t *testing.T, queueInstance *diskQueue) {
 }
 
 func assertEventMarker(t *testing.T, event publisher.Event, expectedMarker string) {
-	actualMarker, _ := event.Content.Fields.GetValue("marker")
+	actualMarker, _ := event.Content.Fields.GetValue("message")
 	assert.Equal(t, expectedMarker, actualMarker, "unexpected marker in consumed event")
 }
 
 func makeDiskQueueTestEvent(marker string) publisher.Event {
 	return queuetest.MakeEvent(mapstr.M{
-		"marker":  marker,
+		"message": marker,
 		"payload": strings.Repeat("x", 2048),
 	})
 }
@@ -242,16 +221,4 @@ func countSegmentFiles(t *testing.T, dir string) int {
 		}
 	}
 	return count
-}
-
-func printBatch(t *testing.T, batch queue.Batch[publisher.Event]) {
-	t.Log("====================")
-	if batch == nil {
-		t.Log("batch is nil")
-		return
-	}
-	for i := range batch.Count() {
-		t.Log(batch.Entry(i).Content.Fields["marker"])
-		t.Log("====================")
-	}
 }
