@@ -20,7 +20,6 @@ package diskqueue
 import (
 	"flag"
 	"math/rand/v2"
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -100,13 +99,14 @@ func (t testQueue) Close(force bool) error {
 }
 
 func TestQueueDoesNotReplyLastEventAfterRestart(t *testing.T) {
-	diskQueuePath := fs.TempDir(t, "..", "..", "..", "build", "integration-tests")
+	workDir := fs.TempDir(t, "..", "..", "..", "build", "integration-tests")
+	diskQueuePath := filepath.Join(workDir, "queue")
 	settings := DefaultSettings()
 	settings.Path = diskQueuePath
 	// Keep segment size small enough to produce multiple segments quickly.
 	settings.MaxSegmentSize = 4 * 1024
 
-	fileLogger := logptest.NewFileLogger(t, diskQueuePath)
+	fileLogger := logptest.NewFileLogger(t, workDir)
 
 	// Run 1: publish and ACK two events.
 	run1Queue, err := NewQueue(fileLogger.Logger, nil, settings, nil, &paths.Path{})
@@ -125,8 +125,7 @@ func TestQueueDoesNotReplyLastEventAfterRestart(t *testing.T) {
 	run2Producer := run2Queue.Producer(queue.ProducerConfig{})
 	publishAndACKSingleEvent(t, run2Queue, run2Producer, "event-3")
 	run2Producer.Close()
-	segCount := countSegmentFiles(t, diskQueuePath)
-	assert.GreaterOrEqual(t, segCount, 2, "reproduction precondition requires at least two segment files")
+	requireSegmentFiles(t, diskQueuePath, 2)
 	closeQueueAndWait(t, run2Queue)
 
 	// Run 3: reopen queue without publishing a new event. Correct behavior is
@@ -137,14 +136,12 @@ func TestQueueDoesNotReplyLastEventAfterRestart(t *testing.T) {
 
 	replayedBatch := readBatch(t, run3Queue, 3*time.Second)
 	if replayedBatch != nil {
-		marker, _ := replayedBatch.Entry(0).Content.Fields.GetValue("marker")
+		msg, _ := replayedBatch.Entry(0).Content.Fields.GetValue("message")
 		replayedBatch.Done()
-		require.Failf(
-			t,
-			"unexpected replayed event after restart",
-			"found replayed batch with count=%d and first marker=%v",
+		t.Fatalf("unexpected replayed event after restart"+
+			"found replayed batch with count=%d and first message=%q",
 			replayedBatch.Count(),
-			marker,
+			msg,
 		)
 	}
 	closeQueueAndWait(t, run3Queue)
@@ -154,15 +151,15 @@ func publishAndACKSingleEvent(
 	t *testing.T,
 	queueInstance *diskQueue,
 	producer queue.Producer[publisher.Event],
-	marker string,
+	msg string,
 ) {
-	_, ok := producer.Publish(makeDiskQueueTestEvent(marker))
-	require.True(t, ok, "publishing test event %q should succeed", marker)
+	_, ok := producer.Publish(makeDiskQueueTestEvent(msg))
+	require.True(t, ok, "publishing test event %q should succeed", msg)
 
 	batch := readBatch(t, queueInstance, 3*time.Second)
-	require.NotNil(t, batch, "queue should return a batch for marker %q", marker)
-	require.Equal(t, 1, batch.Count(), "queue should return a single event batch for marker %q", marker)
-	assertEventMarker(t, batch.Entry(0), marker)
+	require.NotNil(t, batch, "queue should return a batch for message %q", msg)
+	require.Equal(t, 1, batch.Count(), "queue should return a single event batch for message %q", msg)
+	assertEventMessage(t, batch.Entry(0), msg)
 	batch.Done()
 }
 
@@ -198,27 +195,26 @@ func closeQueueAndWait(t *testing.T, queueInstance *diskQueue) {
 	}
 }
 
-func assertEventMarker(t *testing.T, event publisher.Event, expectedMarker string) {
-	actualMarker, _ := event.Content.Fields.GetValue("message")
-	assert.Equal(t, expectedMarker, actualMarker, "unexpected marker in consumed event")
+func assertEventMessage(t *testing.T, event publisher.Event, expectedMsg string) {
+	msg, _ := event.Content.Fields.GetValue("message")
+	assert.Equal(t, expectedMsg, msg, "unexpected message in consumed event")
 }
 
-func makeDiskQueueTestEvent(marker string) publisher.Event {
+func makeDiskQueueTestEvent(msg string) publisher.Event {
 	return queuetest.MakeEvent(mapstr.M{
-		"message": marker,
+		"message": msg,
 		"payload": strings.Repeat("x", 2048),
 	})
 }
 
-func countSegmentFiles(t *testing.T, dir string) int {
-	entries, err := os.ReadDir(dir)
-	require.NoError(t, err, "disk queue directory should be readable")
-
-	count := 0
-	for _, entry := range entries {
-		if !entry.IsDir() && filepath.Ext(entry.Name()) == ".seg" {
-			count++
-		}
+func requireSegmentFiles(t *testing.T, dir string, expected int) {
+	segFiles, err := filepath.Glob(filepath.Join(dir, "*.seg"))
+	if err != nil {
+		t.Fatalf("cannot resolve segment files glob: %s", err)
 	}
-	return count
+
+	gotSegments := len(segFiles)
+	if expected != gotSegments {
+		t.Fatalf("expecting %d segment files, got %d. Segment files:\n%s", expected, gotSegments, strings.Join(segFiles, "\n"))
+	}
 }
