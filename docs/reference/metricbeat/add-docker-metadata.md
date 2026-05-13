@@ -47,6 +47,7 @@ processors:
       #labels.dedot: false
       #wait_for_metadata: false
       #wait_for_metadata_timeout: 30s
+      #wait_for_metadata_retry_period: 10s
       # To connect to Docker over TLS you must specify a client and CA certificate.
       #ssl:
       #  certificate_authority: "/etc/pki/root/ca.pem"
@@ -91,4 +92,7 @@ It has the following settings:
 
 `wait_for_metadata_timeout`
 :   (Optional) The maximum time allowed for the processor to connect to Docker and fetch metadata. Applies regardless of `wait_for_metadata`. To retry the connection indefinitely, set to `0`. Defaults to `30s`.
+
+`wait_for_metadata_retry_period`
+:   (Optional) How long to wait between Docker connection retry attempts. Defaults to `10s`.
 
