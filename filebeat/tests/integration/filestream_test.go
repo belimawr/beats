@@ -23,6 +23,8 @@ import (
 	"fmt"
 	"path"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -155,10 +157,22 @@ logging:
 		10*time.Second,
 		"Filebeat did not start looking for files to ingest")
 
-<<<<<<< HEAD
 	eofMsg := fmt.Sprintf("End of file reached: %s; Backoff now.", logFilePath)
 	filebeat.WaitLogsContains(eofMsg, 10*time.Second, "EOF was not reached")
-=======
+
+	requirePublishedEvents(t, filebeat, numEvents, outputFile)
+
+	// Read the registry log file and check the TTL
+	registryLogFile := filepath.Join(tempDir, "data", "registry", "filebeat", "log.json")
+	entries := readFilestreamRegistryLog(t, registryLogFile)
+	require.GreaterOrEqual(t, len(entries), 1, "No registry entries found")
+	firstEntry := entries[0]
+
+	expectedTTL := time.Duration(-1)
+	assert.Equal(t, expectedTTL, firstEntry.TTL,
+		"Registry entry TTL should be -1 by default, but got %v", firstEntry.TTL)
+}
+
 // migrated from test_fixup_registry_entries_with_global_id in test_input.py
 func TestFixupRegistryEntriesWithGlobalID(t *testing.T) {
 	filebeat := integration.NewBeat(
@@ -177,12 +191,7 @@ func TestFixupRegistryEntriesWithGlobalID(t *testing.T) {
 	integration.WriteLogFile(t, logFilepath, 50, false)
 
 	// First run: no explicit ID, Filestream stores state under `.global`.
-	cfgYAML := getConfig(t, map[string]any{
-		"homePath":    workDir,
-		"logFilePath": logFilepath,
-		"inputID":     "",
-	}, "", "filestream_fixup_registry_global_id.yml")
-	filebeat.WriteConfigFile(cfgYAML)
+	filebeat.WriteConfigFile(globalIDMigrationConfig(logFilepath, "", workDir))
 	filebeat.Start()
 
 	eofMsg := fmt.Sprintf("End of file reached: %s; Backoff now.", msgLogFilepath)
@@ -191,12 +200,7 @@ func TestFixupRegistryEntriesWithGlobalID(t *testing.T) {
 	filebeat.Stop()
 
 	// Second run: add explicit ID and verify previous state is migrated.
-	cfgYAML = getConfig(t, map[string]any{
-		"homePath":    workDir,
-		"logFilePath": logFilepath,
-		"inputID":     "test-fix-global-id",
-	}, "", "filestream_fixup_registry_global_id.yml")
-	filebeat.WriteConfigFile(cfgYAML)
+	filebeat.WriteConfigFile(globalIDMigrationConfig(logFilepath, "test-fix-global-id", workDir))
 	filebeat.RemoveLogFiles()
 	filebeat.Start()
 
@@ -210,41 +214,59 @@ func TestFixupRegistryEntriesWithGlobalID(t *testing.T) {
 	filebeat.Stop()
 	requirePublishedEvents(t, filebeat, 52, outputFile)
 
-	registryFile := filepath.Join(workDir, "data", "registry", "filebeat", "log.json")
-	entries, _ := readFilestreamRegistryLog(t, registryFile)
-	registry := parseRegistry(entries)
-
 	requireRegistryEntryRemoved(t, workDir, ".global")
-
-	// Assert old registry entry was removed
-	for key, entry := range registry {
-		if strings.Contains(key, "filestream::.global::") && !entry.Removed {
-			t.Error("entry from input without ID was not removed from registry")
-		}
-	}
 }
 
-func TestFilestreamCanMigrateIdentity(t *testing.T) {
-	cfgTemplate := `
+func globalIDMigrationConfig(logFilePath, inputID, homePath string) string {
+	idBlock := ""
+	if inputID != "" {
+		idBlock = fmt.Sprintf("    id: %s\n", inputID)
+	}
+
+	return fmt.Sprintf(`
 filebeat.inputs:
   - type: filestream
-    id: "test-migrate-ID"
-    paths:
+%s    paths:
       - %s
-%s
->>>>>>> be7800883 ([Filestream] Fix global ID state migration (#50599))
+    prospector:
+      scanner:
+        check_interval: 100ms
 
-	requirePublishedEvents(t, filebeat, numEvents, outputFile)
+queue.mem:
+  flush.timeout: 0s
 
-	// Read the registry log file and check the TTL
-	registryLogFile := filepath.Join(tempDir, "data", "registry", "filebeat", "log.json")
-	entries := readFilestreamRegistryLog(t, registryLogFile)
-	require.GreaterOrEqual(t, len(entries), 1, "No registry entries found")
-	firstEntry := entries[0]
+path.home: %s
 
-	expectedTTL := time.Duration(-1)
-	assert.Equal(t, expectedTTL, firstEntry.TTL,
-		"Registry entry TTL should be -1 by default, but got %v", firstEntry.TTL)
+output.file:
+  path: ${path.home}
+  filename: "output-file"
+  rotate_on_startup: false
+
+logging:
+  level: debug
+  selectors:
+    - input.filestream
+    - input.filestream.prospector
+  metrics:
+    enabled: false
+`, idBlock, logFilePath, homePath)
+}
+
+func requireRegistryEntryRemoved(t *testing.T, workDir, identity string) {
+	t.Helper()
+
+	registryFile := filepath.Join(workDir, "data", "registry", "filebeat", "log.json")
+	entries := readFilestreamRegistryLog(t, registryFile)
+	inputEntries := []registryEntry{}
+	for _, currentEntry := range entries {
+		if strings.Contains(currentEntry.Key, identity) {
+			inputEntries = append(inputEntries, currentEntry)
+		}
+	}
+
+	require.NotEmpty(t, inputEntries, "no registry entries found for identity %q", identity)
+	lastEntry := inputEntries[len(inputEntries)-1]
+	assert.Equal(t, time.Duration(0), lastEntry.TTL, "'%s' has not been removed from the registry", lastEntry.Key)
 }
 
 func requirePublishedEvents(
