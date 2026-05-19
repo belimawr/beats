@@ -13,7 +13,6 @@
       --muted: #a7b8de;
       --accent: #57b6ff;
       --accent-2: #7cf29a;
-      --warning: #ffc46b;
       --line: #4f6394;
       --line-dim: #2d3960;
       --node-border: #5f78b4;
@@ -22,6 +21,7 @@
       --dimmed: 0.24;
       --path-on: #8dd8ff;
       --glob-on: #96f2b0;
+      --goroutine: #ffcc72;
       --font: Inter, "Segoe UI", Roboto, Arial, sans-serif;
     }
 
@@ -37,12 +37,19 @@
     }
 
     .page {
-      max-width: 1520px;
+      max-width: 1320px;
       margin: 0 auto;
       padding: 20px;
       display: grid;
-      grid-template-columns: 1fr 360px;
+      grid-template-columns: minmax(0, 1fr) 340px;
       gap: 16px;
+      align-items: start;
+    }
+
+    @media (max-width: 1180px) {
+      .page {
+        grid-template-columns: 1fr;
+      }
     }
 
     .card {
@@ -125,7 +132,8 @@
 
     .diagram-shell {
       position: relative;
-      overflow: auto;
+      overflow-y: auto;
+      overflow-x: hidden;
       border-radius: 10px;
       border: 1px solid #2a3b69;
       background: linear-gradient(180deg, #0d1732 0%, #0b1228 100%);
@@ -133,9 +141,10 @@
 
     .diagram-canvas {
       position: relative;
-      width: 2860px;
-      height: 760px;
-      margin: 8px;
+      width: 860px;
+      max-width: 100%;
+      min-height: 2100px;
+      margin: 8px auto;
       background:
         linear-gradient(transparent 39px, rgba(54, 74, 120, 0.18) 40px),
         linear-gradient(90deg, transparent 39px, rgba(54, 74, 120, 0.18) 40px);
@@ -146,7 +155,30 @@
     svg#links {
       position: absolute;
       inset: 0;
+      width: 100%;
+      height: 2100px;
       pointer-events: none;
+    }
+
+    .lane {
+      position: absolute;
+      left: 18px;
+      right: 18px;
+      border: 1px dashed rgba(255, 204, 114, 0.4);
+      border-radius: 12px;
+      background: rgba(255, 204, 114, 0.04);
+    }
+
+    .lane-label {
+      position: absolute;
+      left: 12px;
+      top: -10px;
+      font-size: 11px;
+      background: #10203f;
+      border: 1px solid rgba(255, 204, 114, 0.4);
+      color: #ffd79a;
+      padding: 2px 8px;
+      border-radius: 999px;
     }
 
     .edge {
@@ -172,9 +204,9 @@
 
     .node {
       position: absolute;
-      width: 190px;
-      min-height: 86px;
-      padding: 10px;
+      width: 260px;
+      min-height: 98px;
+      padding: 10px 10px 11px;
       border-radius: 10px;
       border: 1px solid var(--node-border);
       background: linear-gradient(180deg, #1a2a53 0%, var(--panel-2) 100%);
@@ -200,7 +232,30 @@
       margin: 6px 0 0;
       color: #c8d7fa;
       font-size: 12px;
-      line-height: 1.3;
+      line-height: 1.35;
+    }
+
+    .badges {
+      margin-top: 6px;
+      display: flex;
+      gap: 6px;
+      flex-wrap: wrap;
+    }
+
+    .badge {
+      font-size: 10px;
+      line-height: 1;
+      border: 1px solid #4864a7;
+      border-radius: 999px;
+      padding: 3px 6px;
+      color: #c9dcff;
+      background: #122552;
+    }
+
+    .badge.goroutine {
+      border-color: rgba(255, 204, 114, 0.75);
+      color: #ffe2aa;
+      background: rgba(117, 71, 7, 0.35);
     }
 
     .node.active {
@@ -223,7 +278,7 @@
     }
 
     .legend {
-      margin: 8px 0 0;
+      margin: 10px 0 0;
       display: flex;
       gap: 14px;
       font-size: 12px;
@@ -245,8 +300,6 @@
       display: grid;
       gap: 10px;
       align-content: start;
-      max-height: calc(100vh - 44px);
-      overflow: auto;
     }
 
     .section {
@@ -306,7 +359,7 @@
       <header class="toolbar">
         <div>
           <h1>filestream input: configuration -&gt; read -&gt; publish</h1>
-          <div class="subtle">Interactive, high-level view for <code>filebeat/input/filestream</code></div>
+          <div class="subtle">Vertical flow view for <code>filebeat/input/filestream</code> (no horizontal scrolling)</div>
         </div>
         <div class="controls">
           <div class="toggle" role="group" aria-label="path mode">
@@ -320,78 +373,101 @@
       <div class="content">
         <div class="diagram-shell">
           <div id="canvas" class="diagram-canvas">
-            <svg id="links" width="2860" height="760" viewBox="0 0 2860 760" aria-hidden="true">
+            <div class="lane" style="top:52px; height:550px;">
+              <div class="lane-label">Main input goroutine</div>
+            </div>
+            <div class="lane" style="top:790px; height:480px;">
+              <div class="lane-label">Prospector goroutines (watch + event loop)</div>
+            </div>
+            <div class="lane" style="top:1340px; height:620px;">
+              <div class="lane-label">Per-file harvester goroutine(s)</div>
+            </div>
+
+            <svg id="links" viewBox="0 0 860 2100" aria-hidden="true">
               <defs>
                 <marker id="arrow" markerWidth="10" markerHeight="10" refX="9" refY="3.5" orient="auto">
                   <polygon points="0 0, 10 3.5, 0 7" fill="#5f78b4"></polygon>
                 </marker>
               </defs>
-              <path id="edge-config-configure" class="edge" d="M230,318 L320,318" />
-              <path id="edge-configure-newprospector" class="edge" d="M510,318 L600,318" />
-              <path id="edge-newprospector-fullpath" class="edge" d="M790,318 C845,318 865,230 910,230" />
-              <path id="edge-newprospector-globbranch" class="edge" d="M790,318 C845,318 865,500 910,500" />
-              <path id="edge-fullpath-filewatcher" class="edge" d="M1100,230 C1160,230 1180,318 1230,318" />
-              <path id="edge-globbranch-filewatcher" class="edge" d="M1100,500 C1160,500 1180,318 1230,318" />
-              <path id="edge-filewatcher-fsevent" class="edge" d="M1420,318 L1500,318" />
-              <path id="edge-fsevent-harvestergroup" class="edge" d="M1690,318 L1770,318" />
-              <path id="edge-harvestergroup-filestreamrun" class="edge" d="M1960,318 L2040,318" />
-              <path id="edge-filestreamrun-publish" class="edge" d="M2230,318 L2310,318" />
-              <path id="edge-publish-ack" class="edge" d="M2500,318 L2580,318" />
+              <path id="edge-config-configure" class="edge" d="M430,168 L430,250" />
+              <path id="edge-configure-newprospector" class="edge" d="M430,348 L430,430" />
+              <path id="edge-newprospector-fullpath" class="edge" d="M430,528 C430,575 190,575 190,620" />
+              <path id="edge-newprospector-globbranch" class="edge" d="M430,528 C430,575 670,575 670,620" />
+              <path id="edge-fullpath-filewatcher" class="edge" d="M190,718 C190,780 430,780 430,830" />
+              <path id="edge-globbranch-filewatcher" class="edge" d="M670,718 C670,780 430,780 430,830" />
+              <path id="edge-filewatcher-perfile" class="edge" d="M430,928 L430,1010" />
+              <path id="edge-perfile-fsevent" class="edge" d="M430,1108 L430,1190" />
+              <path id="edge-fsevent-harvestergroup" class="edge" d="M430,1288 L430,1370" />
+              <path id="edge-harvestergroup-filestreamrun" class="edge" d="M430,1468 L430,1550" />
+              <path id="edge-filestreamrun-publish" class="edge" d="M430,1648 L430,1730" />
+              <path id="edge-publish-ack" class="edge" d="M430,1828 L430,1910" />
             </svg>
 
-            <button id="config" class="node" style="left:40px; top:272px">
+            <button id="config" class="node" style="left:300px; top:70px">
               <h3>Input config</h3>
-              <p><code>paths</code>, parser, close, identity</p>
+              <div class="badges"><span class="badge">same goroutine</span></div>
+              <p><code>paths</code>, parser, close policy, file identity</p>
             </button>
 
-            <button id="configure" class="node" style="left:320px; top:272px">
-              <h3>Plugin + Configure</h3>
-              <p><code>InputManager.Create</code> and <code>configure()</code></p>
+            <button id="configure" class="node" style="left:300px; top:250px">
+              <h3>Plugin + configure()</h3>
+              <div class="badges"><span class="badge">same goroutine</span></div>
+              <p><code>InputManager.Create</code> wires prospector + harvester</p>
             </button>
 
-            <button id="newprospector" class="node" style="left:600px; top:272px">
+            <button id="newprospector" class="node" style="left:300px; top:430px">
               <h3>newProspector()</h3>
-              <p>Build file watcher + identifier + scanner</p>
+              <div class="badges"><span class="badge">same goroutine</span></div>
+              <p>Create scanner/watcher + source identifier strategy</p>
             </button>
 
-            <button id="fullpath" class="node" style="left:910px; top:184px">
+            <button id="fullpath" class="node" style="left:60px; top:620px">
               <h3>Branch A: full path</h3>
-              <p>Pattern usually maps to one concrete path</p>
+              <p>Usually resolves to 0..1 active file for each configured path</p>
             </button>
 
-            <button id="globbranch" class="node" style="left:910px; top:454px">
+            <button id="globbranch" class="node" style="left:540px; top:620px">
               <h3>Branch B: glob</h3>
-              <p>Expand <code>**</code>, glob multiple candidates</p>
+              <p>Expands <code>**</code> and evaluates wildcard matches</p>
             </button>
 
-            <button id="filewatcher" class="node" style="left:1230px; top:272px">
+            <button id="filewatcher" class="node" style="left:300px; top:830px">
               <h3>fileScanner + fileWatcher</h3>
-              <p>Build descriptors, compare scans, emit operations</p>
+              <div class="badges"><span class="badge goroutine">new goroutine</span></div>
+              <p>Periodic scans + FS diff emit create/write/truncate/rename/delete</p>
             </button>
 
-            <button id="fsevent" class="node" style="left:1500px; top:272px">
+            <button id="perfile" class="node" style="left:300px; top:1010px">
+              <h3>Per matched file artifacts</h3>
+              <p id="perFileText">Creates one descriptor/source/event chain per matched file</p>
+            </button>
+
+            <button id="fsevent" class="node" style="left:300px; top:1190px">
               <h3>Prospector event loop</h3>
-              <p><code>onFSEvent</code> starts/restarts harvesters</p>
+              <div class="badges"><span class="badge goroutine">new goroutine</span></div>
+              <p><code>onFSEvent</code> updates metadata and starts/restarts harvesters</p>
             </button>
 
-            <button id="harvestergroup" class="node" style="left:1770px; top:272px">
+            <button id="harvestergroup" class="node" style="left:300px; top:1370px">
               <h3>HarvesterGroup</h3>
-              <p>lock cursor + connect pipeline + cursorPublisher</p>
+              <div class="badges"><span class="badge goroutine">per file goroutine</span></div>
+              <p>Lock cursor resource, connect pipeline, create cursorPublisher</p>
             </button>
 
-            <button id="filestreamrun" class="node" style="left:2040px; top:272px">
+            <button id="filestreamrun" class="node" style="left:300px; top:1550px">
               <h3>filestream.Run()</h3>
-              <p>open file, read loop, parser pipeline</p>
+              <div class="badges"><span class="badge goroutine">per file goroutine</span></div>
+              <p>Open, decode, parse, filter, and read line-by-line</p>
             </button>
 
-            <button id="publish" class="node" style="left:2310px; top:272px">
+            <button id="publish" class="node" style="left:300px; top:1730px">
               <h3>Publish event</h3>
               <p><code>p.Publish(message.ToEvent(), state)</code></p>
             </button>
 
-            <button id="ack" class="node" style="left:2580px; top:272px">
+            <button id="ack" class="node" style="left:300px; top:1910px">
               <h3>ACK updates cursor</h3>
-              <p><code>newInputACKHandler</code> -&gt; persistent store</p>
+              <p><code>newInputACKHandler</code> writes persistent cursor updates</p>
             </button>
           </div>
         </div>
@@ -399,6 +475,7 @@
         <div class="legend">
           <span><span class="swatch" style="background: var(--path-on)"></span>active full-path branch</span>
           <span><span class="swatch" style="background: var(--glob-on)"></span>active glob branch</span>
+          <span><span class="swatch" style="background: var(--goroutine)"></span>runs in different goroutine</span>
           <span><span class="swatch" style="background: #ffe082"></span>selected node details</span>
         </div>
       </div>
@@ -408,6 +485,15 @@
       <section class="section">
         <h2>Mode comparison (ingest target selection)</h2>
         <ul id="modeSummary"></ul>
+      </section>
+
+      <section class="section">
+        <h2>Goroutine model</h2>
+        <ul>
+          <li><code>prospector.Run</code> starts separate goroutines for watcher and event loop.</li>
+          <li><code>HarvesterGroup.Start</code> spawns a task per source (per file identity).</li>
+          <li>Glob mode can produce many sources, therefore many concurrent harvester goroutines.</li>
+        </ul>
       </section>
 
       <section class="section">
@@ -447,10 +533,10 @@
       },
       fullpath: {
         title: "Branch A: full path",
-        description: "A concrete path pattern normally resolves to one match, so scanner work and event fan-out are narrower.",
+        description: "A concrete path pattern normally resolves to one current filename, giving a small fan-out.",
         modeNotes: {
-          path: "Typical example: paths: ['/var/log/myapp.log']. filepath.Glob returns 0 or 1 current file; updates depend on that path.",
-          glob: "In glob mode this branch is de-emphasized; scanner uses wildcard patterns instead."
+          path: "Typical example: paths: ['/var/log/myapp.log']. filepath.Glob usually yields 0..1 file.",
+          glob: "In glob mode this branch is intentionally dimmed."
         },
         refs: [
           "filebeat/input/filestream/fswatch.go:457-469",
@@ -461,8 +547,8 @@
         title: "Branch B: glob",
         description: "Wildcard patterns are expanded (including recursive ** support), then each expanded pattern is globbed.",
         modeNotes: {
-          path: "In full-path mode this branch is de-emphasized; no practical wildcard fan-out.",
-          glob: "Typical example: paths: ['/var/log/myapp/*.log'] or '/var/log/**/app.log'. resolveRecursiveGlobs may expand one pattern into many.",
+          path: "In full-path mode this branch is intentionally dimmed.",
+          glob: "Wildcard mode can resolve to many files in one scan cycle."
         },
         refs: [
           "filebeat/input/filestream/fswatch.go:434-455",
@@ -470,32 +556,46 @@
         ]
       },
       filewatcher: {
-        title: "fileScanner + fileWatcher",
-        description: "Scanner builds FileDescriptors (size/fingerprint/identity) and watcher diffs old vs new scan to emit create/write/truncate/rename/delete.",
+        title: "fileScanner + fileWatcher (goroutine)",
+        description: "fileWatcher.Run executes scan/watch work in its own goroutine and emits FSEvents.",
         refs: [
-          "filebeat/input/filestream/fswatch.go:172-324",
-          "filebeat/input/filestream/fswatch.go:471-531"
+          "filebeat/input/filestream/prospector.go:343-345",
+          "filebeat/input/filestream/fswatch.go:134-163",
+          "filebeat/input/filestream/fswatch.go:172-324"
+        ]
+      },
+      perfile: {
+        title: "Per matched file artifacts",
+        description: "For each matched filename, scanner creates a FileDescriptor and source identity; watcher emits events using that source.",
+        modeNotes: {
+          path: "Full-path mode usually creates one descriptor/source pipeline per configured path.",
+          glob: "Glob mode can create N descriptor/source pipelines in the same scan when multiple files match."
+        },
+        refs: [
+          "filebeat/input/filestream/fswatch.go:471-531",
+          "filebeat/input/filestream/fswatch.go:184-199",
+          "filebeat/input/filestream/fswatch.go:334-356"
         ]
       },
       fsevent: {
-        title: "Prospector event loop",
-        description: "Prospector receives each FSEvent, updates metadata/cursor as needed, and calls Start/Restart/Stop on the HarvesterGroup.",
+        title: "Prospector event loop (goroutine)",
+        description: "Prospector.Run starts a separate goroutine that consumes watcher events and dispatches Start/Restart/Stop decisions.",
         refs: [
-          "filebeat/input/filestream/prospector.go:325-433",
+          "filebeat/input/filestream/prospector.go:348-360",
           "filebeat/input/filestream/prospector.go:382-429"
         ]
       },
       harvestergroup: {
-        title: "HarvesterGroup startHarvester()",
-        description: "HarvesterGroup reserves source ID, locks cursor resource, opens pipeline client, and instantiates cursorPublisher for state-aware publishing.",
+        title: "HarvesterGroup startHarvester() (per file goroutine)",
+        description: "Each source can get a dedicated harvester task that locks a cursor resource and connects to pipeline.",
         refs: [
-          "filebeat/input/filestream/internal/input-logfile/harvester.go:217-342",
-          "filebeat/input/filestream/internal/input-logfile/harvester.go:295-309"
+          "filebeat/input/filestream/internal/input-logfile/harvester.go:181-190",
+          "filebeat/input/filestream/internal/input-logfile/harvester.go:217-342"
         ]
       },
       filestreamrun: {
         title: "filestream.Run() and readFromSource()",
-        description: "Harvester opens the file, composes reader stack (encoding, parsers, metadata, limit), loops on Next(), updates offset, and forwards events.",
+        description: "Inside each harvester goroutine: open file, build reader stack, iterate lines, and publish events.",
         refs: [
           "filebeat/input/filestream/input.go:208-277",
           "filebeat/input/filestream/input.go:457-534",
@@ -504,7 +604,7 @@
       },
       publish: {
         title: "Publish event + cursor delta",
-        description: "Each accepted line becomes a beat.Event. Publish attaches cursor update as event.Private, preserving event->state ordering.",
+        description: "Each accepted line becomes a beat.Event. Publish carries cursor delta in event.Private.",
         refs: [
           "filebeat/input/filestream/input.go:780-786",
           "filebeat/input/filestream/internal/input-logfile/publish.go:72-110"
@@ -512,7 +612,7 @@
       },
       ack: {
         title: "ACK handler persists state",
-        description: "ACK listener collects update operations and update writer applies them to the persistent filestream registry store.",
+        description: "ACK listener batches update operations and writes cursor updates to the persistent filestream store.",
         refs: [
           "filebeat/input/filestream/internal/input-logfile/input.go:110-136",
           "filebeat/input/filestream/internal/input-logfile/publish.go:118-153"
@@ -522,17 +622,22 @@
 
     const modeSummaries = {
       path: [
-        "Config often points to one concrete file path; scanner normalization still applies.",
-        "filepath.Glob usually yields one active filename per configured path.",
-        "Lower fan-out: fewer descriptors and fewer parallel harvester candidates.",
-        "If log location changes outside that concrete path, ingestion may not follow unless pattern changes."
+        "Configured path usually maps to one active file at a time.",
+        "Per file, scanner creates one FileDescriptor, one source identity, and one harvester candidate.",
+        "Fan-out is usually low: near 1:1 from path to harvester.",
+        "Useful when you want strict source targeting."
       ],
       glob: [
-        "Config wildcard can match many files and directories in one input.",
-        "Recursive glob support expands '**' before final filepath.Glob evaluation.",
-        "Higher fan-out: dedupe logic handles repeated matches and identity collisions.",
-        "Better coverage for rolling files and directory trees, with more scan work."
+        "Wildcard paths can match many files in one scan cycle.",
+        "For each matched file, scanner creates FileDescriptor + source identity + event stream candidate.",
+        "Prospector may create multiple harvester goroutines (subject to harvester_limit).",
+        "Useful for rotating file sets and directory trees."
       ]
+    };
+
+    const perFileTextByMode = {
+      path: "Creates ~1 descriptor/source/event chain per configured concrete path",
+      glob: "Creates N descriptor/source/event chains when glob matches multiple files"
     };
 
     const edgesByBranch = {
@@ -549,6 +654,7 @@
     const detailDescription = document.getElementById("detailDescription");
     const detailModeNote = document.getElementById("detailModeNote");
     const detailRefs = document.getElementById("detailRefs");
+    const perFileText = document.getElementById("perFileText");
 
     let mode = "path";
     let selectedNode = "newprospector";
@@ -557,6 +663,7 @@
       mode = nextMode;
       modePathBtn.classList.toggle("active", mode === "path");
       modeGlobBtn.classList.toggle("active", mode === "glob");
+      perFileText.textContent = perFileTextByMode[mode];
       applyBranchStyling();
       renderModeSummary();
       renderDetails(selectedNode);
@@ -637,6 +744,7 @@
         "newprospector",
         mode === "path" ? "fullpath" : "globbranch",
         "filewatcher",
+        "perfile",
         "fsevent",
         "harvestergroup",
         "filestreamrun",
@@ -649,7 +757,8 @@
         "edge-configure-newprospector",
         branchEdges[0],
         branchEdges[1],
-        "edge-filewatcher-fsevent",
+        "edge-filewatcher-perfile",
+        "edge-perfile-fsevent",
         "edge-fsevent-harvestergroup",
         "edge-harvestergroup-filestreamrun",
         "edge-filestreamrun-publish",
