@@ -1,0 +1,3 @@
+kind: enhancement
+summary: Add an interactive filestream ingestion flow diagram for configuration to publish path behavior
+component: filebeat

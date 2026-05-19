@@ -1,0 +1,689 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Filestream Ingestion Flow</title>
+  <style>
+    :root {
+      --bg: #0b1020;
+      --panel: #111935;
+      --panel-2: #162347;
+      --text: #ebf2ff;
+      --muted: #a7b8de;
+      --accent: #57b6ff;
+      --accent-2: #7cf29a;
+      --warning: #ffc46b;
+      --line: #4f6394;
+      --line-dim: #2d3960;
+      --node-border: #5f78b4;
+      --node-shadow: rgba(0, 0, 0, 0.35);
+      --active-outline: #ffe082;
+      --dimmed: 0.24;
+      --path-on: #8dd8ff;
+      --glob-on: #96f2b0;
+      --font: Inter, "Segoe UI", Roboto, Arial, sans-serif;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      font-family: var(--font);
+      background: radial-gradient(1200px 600px at 30% -10%, #223567 0%, var(--bg) 60%);
+      color: var(--text);
+    }
+
+    .page {
+      max-width: 1520px;
+      margin: 0 auto;
+      padding: 20px;
+      display: grid;
+      grid-template-columns: 1fr 360px;
+      gap: 16px;
+    }
+
+    .card {
+      background: linear-gradient(180deg, var(--panel) 0%, #0f1730 100%);
+      border: 1px solid #2b3d6e;
+      border-radius: 14px;
+      box-shadow: 0 14px 26px var(--node-shadow);
+    }
+
+    .toolbar {
+      padding: 14px 16px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+
+    .toolbar h1 {
+      margin: 0;
+      font-size: 20px;
+      font-weight: 700;
+      color: var(--text);
+    }
+
+    .subtle {
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .controls {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    .toggle {
+      display: inline-flex;
+      border: 1px solid #37508c;
+      border-radius: 999px;
+      padding: 2px;
+      background: #101a39;
+    }
+
+    .toggle button {
+      border: 0;
+      background: transparent;
+      color: var(--muted);
+      padding: 8px 12px;
+      border-radius: 999px;
+      cursor: pointer;
+      font-weight: 600;
+      font-size: 13px;
+    }
+
+    .toggle button.active {
+      color: #05111f;
+      background: var(--accent);
+    }
+
+    #modeGlob.active {
+      background: var(--accent-2);
+    }
+
+    .btn {
+      border: 1px solid #3f5ea2;
+      background: #15244d;
+      color: var(--text);
+      border-radius: 8px;
+      padding: 8px 10px;
+      cursor: pointer;
+      font-size: 13px;
+      font-weight: 600;
+    }
+
+    .content {
+      padding: 8px 12px 12px;
+    }
+
+    .diagram-shell {
+      position: relative;
+      overflow: auto;
+      border-radius: 10px;
+      border: 1px solid #2a3b69;
+      background: linear-gradient(180deg, #0d1732 0%, #0b1228 100%);
+    }
+
+    .diagram-canvas {
+      position: relative;
+      width: 2860px;
+      height: 760px;
+      margin: 8px;
+      background:
+        linear-gradient(transparent 39px, rgba(54, 74, 120, 0.18) 40px),
+        linear-gradient(90deg, transparent 39px, rgba(54, 74, 120, 0.18) 40px);
+      background-size: 40px 40px;
+      border-radius: 8px;
+    }
+
+    svg#links {
+      position: absolute;
+      inset: 0;
+      pointer-events: none;
+    }
+
+    .edge {
+      stroke: var(--line);
+      stroke-width: 3;
+      fill: none;
+      marker-end: url(#arrow);
+      transition: opacity 0.2s ease, stroke 0.2s ease;
+    }
+
+    .edge.dim {
+      stroke: var(--line-dim);
+      opacity: var(--dimmed);
+    }
+
+    .edge.emphasize-path {
+      stroke: var(--path-on);
+    }
+
+    .edge.emphasize-glob {
+      stroke: var(--glob-on);
+    }
+
+    .node {
+      position: absolute;
+      width: 190px;
+      min-height: 86px;
+      padding: 10px;
+      border-radius: 10px;
+      border: 1px solid var(--node-border);
+      background: linear-gradient(180deg, #1a2a53 0%, var(--panel-2) 100%);
+      color: var(--text);
+      text-align: left;
+      cursor: pointer;
+      box-shadow: 0 7px 16px var(--node-shadow);
+      transition: transform 0.1s ease, opacity 0.2s ease, border-color 0.2s ease;
+    }
+
+    .node:hover {
+      transform: translateY(-2px);
+      border-color: #8db1ff;
+    }
+
+    .node h3 {
+      margin: 0;
+      font-size: 14px;
+      line-height: 1.25;
+    }
+
+    .node p {
+      margin: 6px 0 0;
+      color: #c8d7fa;
+      font-size: 12px;
+      line-height: 1.3;
+    }
+
+    .node.active {
+      outline: 2px solid var(--active-outline);
+      outline-offset: 2px;
+    }
+
+    .node.dim {
+      opacity: var(--dimmed);
+    }
+
+    .node.emphasize-path {
+      border-color: var(--path-on);
+      box-shadow: 0 10px 18px rgba(80, 177, 230, 0.3);
+    }
+
+    .node.emphasize-glob {
+      border-color: var(--glob-on);
+      box-shadow: 0 10px 18px rgba(92, 214, 123, 0.3);
+    }
+
+    .legend {
+      margin: 8px 0 0;
+      display: flex;
+      gap: 14px;
+      font-size: 12px;
+      color: var(--muted);
+      flex-wrap: wrap;
+    }
+
+    .swatch {
+      width: 11px;
+      height: 11px;
+      display: inline-block;
+      border-radius: 999px;
+      margin-right: 6px;
+      vertical-align: middle;
+    }
+
+    .side {
+      padding: 12px;
+      display: grid;
+      gap: 10px;
+      align-content: start;
+      max-height: calc(100vh - 44px);
+      overflow: auto;
+    }
+
+    .section {
+      border: 1px solid #334a83;
+      border-radius: 10px;
+      padding: 10px;
+      background: #0f1b3c;
+    }
+
+    .section h2 {
+      margin: 0 0 8px;
+      font-size: 14px;
+    }
+
+    .section p,
+    .section li {
+      margin: 0;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.45;
+    }
+
+    .section ul {
+      margin: 0;
+      padding-left: 18px;
+      display: grid;
+      gap: 6px;
+    }
+
+    code {
+      background: #101a35;
+      border: 1px solid #2a3e73;
+      border-radius: 5px;
+      padding: 1px 4px;
+      color: #c4ddff;
+      font-size: 11px;
+    }
+
+    .refs {
+      display: grid;
+      gap: 4px;
+      margin-top: 8px;
+    }
+
+    .ref {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 11px;
+      color: #d5e3ff;
+      border-left: 2px solid #4f6cb2;
+      padding-left: 6px;
+    }
+  </style>
+</head>
+<body>
+  <div class="page">
+    <main class="card">
+      <header class="toolbar">
+        <div>
+          <h1>filestream input: configuration -&gt; read -&gt; publish</h1>
+          <div class="subtle">Interactive, high-level view for <code>filebeat/input/filestream</code></div>
+        </div>
+        <div class="controls">
+          <div class="toggle" role="group" aria-label="path mode">
+            <button id="modePath" class="active" type="button">Full path mode</button>
+            <button id="modeGlob" type="button">Glob mode</button>
+          </div>
+          <button id="animateBtn" class="btn" type="button">Animate selected flow</button>
+        </div>
+      </header>
+
+      <div class="content">
+        <div class="diagram-shell">
+          <div id="canvas" class="diagram-canvas">
+            <svg id="links" width="2860" height="760" viewBox="0 0 2860 760" aria-hidden="true">
+              <defs>
+                <marker id="arrow" markerWidth="10" markerHeight="10" refX="9" refY="3.5" orient="auto">
+                  <polygon points="0 0, 10 3.5, 0 7" fill="#5f78b4"></polygon>
+                </marker>
+              </defs>
+              <path id="edge-config-configure" class="edge" d="M230,318 L320,318" />
+              <path id="edge-configure-newprospector" class="edge" d="M510,318 L600,318" />
+              <path id="edge-newprospector-fullpath" class="edge" d="M790,318 C845,318 865,230 910,230" />
+              <path id="edge-newprospector-globbranch" class="edge" d="M790,318 C845,318 865,500 910,500" />
+              <path id="edge-fullpath-filewatcher" class="edge" d="M1100,230 C1160,230 1180,318 1230,318" />
+              <path id="edge-globbranch-filewatcher" class="edge" d="M1100,500 C1160,500 1180,318 1230,318" />
+              <path id="edge-filewatcher-fsevent" class="edge" d="M1420,318 L1500,318" />
+              <path id="edge-fsevent-harvestergroup" class="edge" d="M1690,318 L1770,318" />
+              <path id="edge-harvestergroup-filestreamrun" class="edge" d="M1960,318 L2040,318" />
+              <path id="edge-filestreamrun-publish" class="edge" d="M2230,318 L2310,318" />
+              <path id="edge-publish-ack" class="edge" d="M2500,318 L2580,318" />
+            </svg>
+
+            <button id="config" class="node" style="left:40px; top:272px">
+              <h3>Input config</h3>
+              <p><code>paths</code>, parser, close, identity</p>
+            </button>
+
+            <button id="configure" class="node" style="left:320px; top:272px">
+              <h3>Plugin + Configure</h3>
+              <p><code>InputManager.Create</code> and <code>configure()</code></p>
+            </button>
+
+            <button id="newprospector" class="node" style="left:600px; top:272px">
+              <h3>newProspector()</h3>
+              <p>Build file watcher + identifier + scanner</p>
+            </button>
+
+            <button id="fullpath" class="node" style="left:910px; top:184px">
+              <h3>Branch A: full path</h3>
+              <p>Pattern usually maps to one concrete path</p>
+            </button>
+
+            <button id="globbranch" class="node" style="left:910px; top:454px">
+              <h3>Branch B: glob</h3>
+              <p>Expand <code>**</code>, glob multiple candidates</p>
+            </button>
+
+            <button id="filewatcher" class="node" style="left:1230px; top:272px">
+              <h3>fileScanner + fileWatcher</h3>
+              <p>Build descriptors, compare scans, emit operations</p>
+            </button>
+
+            <button id="fsevent" class="node" style="left:1500px; top:272px">
+              <h3>Prospector event loop</h3>
+              <p><code>onFSEvent</code> starts/restarts harvesters</p>
+            </button>
+
+            <button id="harvestergroup" class="node" style="left:1770px; top:272px">
+              <h3>HarvesterGroup</h3>
+              <p>lock cursor + connect pipeline + cursorPublisher</p>
+            </button>
+
+            <button id="filestreamrun" class="node" style="left:2040px; top:272px">
+              <h3>filestream.Run()</h3>
+              <p>open file, read loop, parser pipeline</p>
+            </button>
+
+            <button id="publish" class="node" style="left:2310px; top:272px">
+              <h3>Publish event</h3>
+              <p><code>p.Publish(message.ToEvent(), state)</code></p>
+            </button>
+
+            <button id="ack" class="node" style="left:2580px; top:272px">
+              <h3>ACK updates cursor</h3>
+              <p><code>newInputACKHandler</code> -&gt; persistent store</p>
+            </button>
+          </div>
+        </div>
+
+        <div class="legend">
+          <span><span class="swatch" style="background: var(--path-on)"></span>active full-path branch</span>
+          <span><span class="swatch" style="background: var(--glob-on)"></span>active glob branch</span>
+          <span><span class="swatch" style="background: #ffe082"></span>selected node details</span>
+        </div>
+      </div>
+    </main>
+
+    <aside class="card side">
+      <section class="section">
+        <h2>Mode comparison (ingest target selection)</h2>
+        <ul id="modeSummary"></ul>
+      </section>
+
+      <section class="section">
+        <h2 id="detailTitle">Node details</h2>
+        <p id="detailDescription">Select any node in the flowchart.</p>
+        <div id="detailModeNote" class="subtle" style="margin-top:8px;"></div>
+        <div id="detailRefs" class="refs"></div>
+      </section>
+    </aside>
+  </div>
+
+  <script>
+    const nodeDetails = {
+      config: {
+        title: "Input config",
+        description: "Filestream config is unpacked into fields like paths, file identity, parser stack, and close behavior.",
+        refs: [
+          "filebeat/input/filestream/config.go:49-95",
+          "filebeat/input/filestream/config.go:204-251"
+        ]
+      },
+      configure: {
+        title: "Plugin + configure()",
+        description: "InputManager creates the managed input, then configure() normalizes settings and builds prospector/harvester instances.",
+        refs: [
+          "filebeat/input/filestream/internal/input-logfile/manager.go:153-290",
+          "filebeat/input/filestream/input.go:108-167"
+        ]
+      },
+      newprospector: {
+        title: "newProspector()",
+        description: "Filestream wires file identity, newFileWatcher, and the fileProspector object that reacts to FS events.",
+        refs: [
+          "filebeat/input/filestream/prospector_creator.go:92-137",
+          "filebeat/input/filestream/prospector_creator.go:112-123"
+        ]
+      },
+      fullpath: {
+        title: "Branch A: full path",
+        description: "A concrete path pattern normally resolves to one match, so scanner work and event fan-out are narrower.",
+        modeNotes: {
+          path: "Typical example: paths: ['/var/log/myapp.log']. filepath.Glob returns 0 or 1 current file; updates depend on that path.",
+          glob: "In glob mode this branch is de-emphasized; scanner uses wildcard patterns instead."
+        },
+        refs: [
+          "filebeat/input/filestream/fswatch.go:457-469",
+          "filebeat/input/filestream/fswatch.go:480-487"
+        ]
+      },
+      globbranch: {
+        title: "Branch B: glob",
+        description: "Wildcard patterns are expanded (including recursive ** support), then each expanded pattern is globbed.",
+        modeNotes: {
+          path: "In full-path mode this branch is de-emphasized; no practical wildcard fan-out.",
+          glob: "Typical example: paths: ['/var/log/myapp/*.log'] or '/var/log/**/app.log'. resolveRecursiveGlobs may expand one pattern into many.",
+        },
+        refs: [
+          "filebeat/input/filestream/fswatch.go:434-455",
+          "filebeat/input/filestream/fswatch.go:480-531"
+        ]
+      },
+      filewatcher: {
+        title: "fileScanner + fileWatcher",
+        description: "Scanner builds FileDescriptors (size/fingerprint/identity) and watcher diffs old vs new scan to emit create/write/truncate/rename/delete.",
+        refs: [
+          "filebeat/input/filestream/fswatch.go:172-324",
+          "filebeat/input/filestream/fswatch.go:471-531"
+        ]
+      },
+      fsevent: {
+        title: "Prospector event loop",
+        description: "Prospector receives each FSEvent, updates metadata/cursor as needed, and calls Start/Restart/Stop on the HarvesterGroup.",
+        refs: [
+          "filebeat/input/filestream/prospector.go:325-433",
+          "filebeat/input/filestream/prospector.go:382-429"
+        ]
+      },
+      harvestergroup: {
+        title: "HarvesterGroup startHarvester()",
+        description: "HarvesterGroup reserves source ID, locks cursor resource, opens pipeline client, and instantiates cursorPublisher for state-aware publishing.",
+        refs: [
+          "filebeat/input/filestream/internal/input-logfile/harvester.go:217-342",
+          "filebeat/input/filestream/internal/input-logfile/harvester.go:295-309"
+        ]
+      },
+      filestreamrun: {
+        title: "filestream.Run() and readFromSource()",
+        description: "Harvester opens the file, composes reader stack (encoding, parsers, metadata, limit), loops on Next(), updates offset, and forwards events.",
+        refs: [
+          "filebeat/input/filestream/input.go:208-277",
+          "filebeat/input/filestream/input.go:457-534",
+          "filebeat/input/filestream/input.go:684-796"
+        ]
+      },
+      publish: {
+        title: "Publish event + cursor delta",
+        description: "Each accepted line becomes a beat.Event. Publish attaches cursor update as event.Private, preserving event->state ordering.",
+        refs: [
+          "filebeat/input/filestream/input.go:780-786",
+          "filebeat/input/filestream/internal/input-logfile/publish.go:72-110"
+        ]
+      },
+      ack: {
+        title: "ACK handler persists state",
+        description: "ACK listener collects update operations and update writer applies them to the persistent filestream registry store.",
+        refs: [
+          "filebeat/input/filestream/internal/input-logfile/input.go:110-136",
+          "filebeat/input/filestream/internal/input-logfile/publish.go:118-153"
+        ]
+      }
+    };
+
+    const modeSummaries = {
+      path: [
+        "Config often points to one concrete file path; scanner normalization still applies.",
+        "filepath.Glob usually yields one active filename per configured path.",
+        "Lower fan-out: fewer descriptors and fewer parallel harvester candidates.",
+        "If log location changes outside that concrete path, ingestion may not follow unless pattern changes."
+      ],
+      glob: [
+        "Config wildcard can match many files and directories in one input.",
+        "Recursive glob support expands '**' before final filepath.Glob evaluation.",
+        "Higher fan-out: dedupe logic handles repeated matches and identity collisions.",
+        "Better coverage for rolling files and directory trees, with more scan work."
+      ]
+    };
+
+    const edgesByBranch = {
+      path: ["edge-newprospector-fullpath", "edge-fullpath-filewatcher"],
+      glob: ["edge-newprospector-globbranch", "edge-globbranch-filewatcher"]
+    };
+
+    const nodes = Array.from(document.querySelectorAll(".node"));
+    const modePathBtn = document.getElementById("modePath");
+    const modeGlobBtn = document.getElementById("modeGlob");
+    const animateBtn = document.getElementById("animateBtn");
+    const modeSummaryList = document.getElementById("modeSummary");
+    const detailTitle = document.getElementById("detailTitle");
+    const detailDescription = document.getElementById("detailDescription");
+    const detailModeNote = document.getElementById("detailModeNote");
+    const detailRefs = document.getElementById("detailRefs");
+
+    let mode = "path";
+    let selectedNode = "newprospector";
+
+    function setMode(nextMode) {
+      mode = nextMode;
+      modePathBtn.classList.toggle("active", mode === "path");
+      modeGlobBtn.classList.toggle("active", mode === "glob");
+      applyBranchStyling();
+      renderModeSummary();
+      renderDetails(selectedNode);
+    }
+
+    function applyBranchStyling() {
+      const pathNode = document.getElementById("fullpath");
+      const globNode = document.getElementById("globbranch");
+      pathNode.classList.remove("dim", "emphasize-path", "emphasize-glob");
+      globNode.classList.remove("dim", "emphasize-path", "emphasize-glob");
+
+      const allEdges = Array.from(document.querySelectorAll(".edge"));
+      allEdges.forEach((edge) => {
+        edge.classList.remove("dim", "emphasize-path", "emphasize-glob");
+      });
+
+      if (mode === "path") {
+        pathNode.classList.add("emphasize-path");
+        globNode.classList.add("dim");
+      } else {
+        globNode.classList.add("emphasize-glob");
+        pathNode.classList.add("dim");
+      }
+
+      const activeBranch = edgesByBranch[mode];
+      const inactiveBranch = mode === "path" ? edgesByBranch.glob : edgesByBranch.path;
+
+      activeBranch.forEach((id) => {
+        const edge = document.getElementById(id);
+        edge.classList.add(mode === "path" ? "emphasize-path" : "emphasize-glob");
+      });
+
+      inactiveBranch.forEach((id) => {
+        const edge = document.getElementById(id);
+        edge.classList.add("dim");
+      });
+    }
+
+    function renderModeSummary() {
+      modeSummaryList.innerHTML = "";
+      modeSummaries[mode].forEach((line) => {
+        const li = document.createElement("li");
+        li.textContent = line;
+        modeSummaryList.appendChild(li);
+      });
+    }
+
+    function renderDetails(nodeId) {
+      selectedNode = nodeId;
+      nodes.forEach((n) => n.classList.toggle("active", n.id === nodeId));
+
+      const detail = nodeDetails[nodeId];
+      if (!detail) {
+        detailTitle.textContent = "Node details";
+        detailDescription.textContent = "No detail available.";
+        detailModeNote.textContent = "";
+        detailRefs.innerHTML = "";
+        return;
+      }
+
+      detailTitle.textContent = detail.title;
+      detailDescription.textContent = detail.description;
+      detailModeNote.textContent = detail.modeNotes ? (detail.modeNotes[mode] || "") : "";
+
+      detailRefs.innerHTML = "";
+      detail.refs.forEach((ref) => {
+        const div = document.createElement("div");
+        div.className = "ref";
+        div.textContent = ref;
+        detailRefs.appendChild(div);
+      });
+    }
+
+    async function animateFlow() {
+      const sequence = [
+        "config",
+        "configure",
+        "newprospector",
+        mode === "path" ? "fullpath" : "globbranch",
+        "filewatcher",
+        "fsevent",
+        "harvestergroup",
+        "filestreamrun",
+        "publish",
+        "ack"
+      ];
+      const branchEdges = mode === "path" ? edgesByBranch.path : edgesByBranch.glob;
+      const edgeSequence = [
+        "edge-config-configure",
+        "edge-configure-newprospector",
+        branchEdges[0],
+        branchEdges[1],
+        "edge-filewatcher-fsevent",
+        "edge-fsevent-harvestergroup",
+        "edge-harvestergroup-filestreamrun",
+        "edge-filestreamrun-publish",
+        "edge-publish-ack"
+      ];
+
+      const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+      animateBtn.disabled = true;
+
+      for (let i = 0; i < sequence.length; i += 1) {
+        renderDetails(sequence[i]);
+        const edgeId = edgeSequence[i];
+        if (edgeId) {
+          const edge = document.getElementById(edgeId);
+          edge.style.strokeWidth = "5";
+          await sleep(240);
+          edge.style.strokeWidth = "3";
+        } else {
+          await sleep(220);
+        }
+      }
+
+      animateBtn.disabled = false;
+    }
+
+    modePathBtn.addEventListener("click", () => setMode("path"));
+    modeGlobBtn.addEventListener("click", () => setMode("glob"));
+    animateBtn.addEventListener("click", animateFlow);
+    nodes.forEach((node) => {
+      node.addEventListener("click", () => renderDetails(node.id));
+    });
+
+    setMode("path");
+    renderDetails("newprospector");
+  </script>
+</body>
+</html>
