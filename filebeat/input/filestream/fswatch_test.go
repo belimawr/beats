@@ -1323,7 +1323,8 @@ scanner:
 	assert.Equal(t, loginp.FileScanMetrics{
 		FilesMatched:        6,
 		FilesUnique:         1,
-		FilesNoIngestTarget: 5,
+		FilesNoIngestTarget: 4,
+		FilesIgnored:        1,
 	}, scanMetrics, "unexpected scan metrics")
 }
 
@@ -1358,6 +1359,53 @@ scanner:
 	assert.Equal(t, baseline.FilesUnique+2, metrics.FilesUnique.Get(), "files_unique")
 	assert.Equal(t, baseline.FilesNoIngestTarget, metrics.FilesNoIngestTarget.Get(), "files_no_ingest_target")
 	assert.Equal(t, baseline.FilesIgnored+1, metrics.FilesIgnored.Get(), "files_ignored")
+}
+
+func TestCountIgnoredFiles(t *testing.T) {
+	now := time.Now()
+	oldModTime := now.Add(-2 * time.Hour)
+	inactiveModTime := now.Add(-30 * time.Minute)
+	newModTime := now.Add(-time.Minute)
+
+	paths := map[string]loginp.FileDescriptor{
+		"old.log":      createTestFileDescriptorWithInfo(&testFileInfo{name: "old.log", size: 1, time: oldModTime}),
+		"inactive.log": createTestFileDescriptorWithInfo(&testFileInfo{name: "inactive.log", size: 1, time: inactiveModTime}),
+		"new.log":      createTestFileDescriptorWithInfo(&testFileInfo{name: "new.log", size: 1, time: newModTime}),
+	}
+
+	tests := map[string]struct {
+		ignoreOlder         time.Duration
+		ignoreInactiveSince time.Time
+		expected            int64
+	}{
+		"does not count ignored files when filters are disabled": {
+			expected: 0,
+		},
+		"counts files ignored by ignore_older": {
+			ignoreOlder: time.Hour,
+			expected:    1,
+		},
+		"counts files ignored by ignore_inactive": {
+			ignoreInactiveSince: now,
+			expected:            3,
+		},
+		"counts each ignored file once when filters overlap": {
+			ignoreOlder:         time.Hour,
+			ignoreInactiveSince: inactiveModTime,
+			expected:            2,
+		},
+	}
+
+	for name, test := range tests {
+		t.Run(name, func(t *testing.T) {
+			assert.Equal(
+				t,
+				test.expected,
+				countIgnoredFiles(paths, test.ignoreOlder, test.ignoreInactiveSince),
+				"unexpected ignored file count",
+			)
+		})
+	}
 }
 
 func mustSourceIdentifier(inputID string) *loginp.SourceIdentifier {

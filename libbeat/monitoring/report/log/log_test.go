@@ -81,6 +81,19 @@ func TestMakeDeltaSnapshot(t *testing.T) {
 	assert.NotContains(t, delta.Ints, "gone")
 }
 
+func TestFilestreamScannerMetricsAreGauges(t *testing.T) {
+	for _, metric := range []string{
+		"filebeat.filestream.files_matched",
+		"filebeat.filestream.files_unique",
+		"filebeat.filestream.files_no_ingest_target",
+		"filebeat.filestream.files_ignored",
+	} {
+		t.Run(metric, func(t *testing.T) {
+			assert.True(t, IsGauge(metric), "filestream scanner metric must be reported as a gauge")
+		})
+	}
+}
+
 func TestReporterLog(t *testing.T) {
 	logger, zapLogs := logptest.NewTestingLoggerWithObserver(t, "")
 
