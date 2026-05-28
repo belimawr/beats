@@ -53,7 +53,7 @@ filebeat.inputs:
     id: "test-filestream-scanner-metrics"
     paths:
       - %s
-    exclude_files: ['excluded\.log$']
+    prospector.scanner.exclude_files: ['excluded\.log$']
     ignore_older: 1h
     prospector.scanner.check_interval: 200ms
     prospector.scanner.fingerprint.enabled: false
@@ -94,15 +94,16 @@ func waitForOutputFile(t *testing.T, dir, pattern string) string {
 	t.Helper()
 
 	var outputFile string
+	var globErr error
 	require.Eventually(t, func() bool {
 		matches, err := filepath.Glob(filepath.Join(dir, pattern))
+		globErr = err
 		if err != nil || len(matches) == 0 {
-			t.Logf("could not find output file %q: %v", pattern, err)
 			return false
 		}
 		outputFile = matches[0]
 		return true
-	}, 30*time.Second, 100*time.Millisecond, "output file %q was not created", pattern)
+	}, 30*time.Second, time.Second, "output file %q was not created: %v", pattern, globErr)
 
 	return outputFile
 }
