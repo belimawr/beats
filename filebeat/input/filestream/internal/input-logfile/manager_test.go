@@ -18,7 +18,6 @@
 package input_logfile
 
 import (
-	"bytes"
 	"errors"
 	"fmt"
 	"strings"
@@ -27,14 +26,14 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"go.uber.org/zap"
-	"go.uber.org/zap/zapcore"
+	"go.uber.org/zap/zaptest/observer"
 
 	v2 "github.com/elastic/beats/v7/filebeat/input/v2"
 	"github.com/elastic/beats/v7/libbeat/statestore"
 	"github.com/elastic/beats/v7/libbeat/statestore/storetest"
 	"github.com/elastic/elastic-agent-libs/config"
 	"github.com/elastic/elastic-agent-libs/logp"
+	"github.com/elastic/elastic-agent-libs/logp/logptest"
 )
 
 const testPluginName = "my_test_plugin"
@@ -191,7 +190,7 @@ func TestInputManager_Create(t *testing.T) {
 			testStore, err := storeReg.Get("test")
 			require.NoError(t, err)
 
-			log, buff := newBufferLogger()
+			log, observedLogs := logptest.NewTestingLoggerWithObserver(t, "")
 
 			cim := &InputManager{
 				Logger:     log,
@@ -214,10 +213,11 @@ func TestInputManager_Create(t *testing.T) {
 			err = cim.Delete(cfg)
 			require.NoError(t, err)
 
-			assert.NotContains(t, buff.String(),
-				"filestream input with ID")
-			assert.NotContains(t, buff.String(),
-				"already exists")
+			assert.False(t, observedLogsContain(observedLogs,
+				"filestream input with ID"),
+				"unexpected duplicated ID warning in logs")
+			assert.False(t, observedLogsContain(observedLogs, "already exists"),
+				"unexpected duplicated ID warning in logs")
 		})
 
 	t.Run("does not start an input with duplicated ID", func(t *testing.T) {
@@ -235,7 +235,7 @@ func TestInputManager_Create(t *testing.T) {
 				testStore, err := storeReg.Get("test")
 				require.NoError(t, err)
 
-				log, buff := newBufferLogger()
+				log, observedLogs := logptest.NewTestingLoggerWithObserver(t, "")
 
 				cim := &InputManager{
 					Logger:     log,
@@ -269,10 +269,9 @@ paths:
 				_, err = cim.Create(cfg2)
 				require.Error(t, err, "filestream should not have created an input with a duplicated ID")
 
-				logs := buff.String()
-				// Assert the logs contain the correct log message
-				assert.Contains(t, logs,
-					fmt.Sprintf("filestream input ID '%s' is duplicated:", tc.id))
+				assert.True(t, observedLogsContain(observedLogs,
+					fmt.Sprintf("filestream input ID '%s' is duplicated:", tc.id)),
+					"duplicated ID warning not found in logs")
 
 				// Assert the error contains the correct text
 				assert.Contains(t, err.Error(),
@@ -286,7 +285,7 @@ paths:
 		testStore, err := storeReg.Get("test")
 		require.NoError(t, err)
 
-		log, _ := newBufferLogger()
+		log := logptest.NewTestingLogger(t, "")
 
 		cim := &InputManager{
 			Logger:     log,
@@ -384,7 +383,7 @@ paths:
 		testStore, err := storeReg.Get("test")
 		require.NoError(t, err)
 
-		log, buff := newBufferLogger()
+		log, observedLogs := logptest.NewTestingLoggerWithObserver(t, "")
 
 		cim := &InputManager{
 			Logger:     log,
@@ -418,25 +417,21 @@ paths:
 		_, err = cim.Create(cfg2)
 		require.NoError(t, err, "filestream should not have created an input with a duplicated ID")
 
-		logs := buff.String()
-		// Assert the logs contain the correct log message
-		assert.Contains(t, logs,
+		assert.True(t, observedLogsContain(observedLogs,
 			"filestream input with ID 'duplicated-id' already exists, this "+
 				"will lead to data duplication, please use a different ID. Metrics "+
-				"collection has been disabled on this input.",
+				"collection has been disabled on this input."),
 			"did not find the expected message about the duplicated input ID")
 	})
 }
 
-func newBufferLogger() (*logp.Logger, *bytes.Buffer) {
-	buf := &bytes.Buffer{}
-	encoderConfig := zap.NewProductionEncoderConfig()
-	encoder := zapcore.NewJSONEncoder(encoderConfig)
-	writeSyncer := zapcore.AddSync(buf)
-	log := logp.NewLogger("", zap.WrapCore(func(_ zapcore.Core) zapcore.Core {
-		return zapcore.NewCore(encoder, writeSyncer, zapcore.DebugLevel)
-	}))
-	return log, buf
+func observedLogsContain(obs *observer.ObservedLogs, substr string) bool {
+	for _, entry := range obs.All() {
+		if strings.Contains(entry.Message, substr) {
+			return true
+		}
+	}
+	return false
 }
 
 func TestTakeOverConfigUnpack(t *testing.T) {

@@ -608,6 +608,7 @@ func copyFile(t *testing.T, from, to string) {
 
 	content, err := os.ReadFile(from)
 	require.NoError(t, err, "failed to read source file %q", from)
+	//nolint:gosec // G703: from and to are test fixture paths under t.TempDir()
 	require.NoError(t, os.WriteFile(to, content, 0o600), "failed to write destination file %q", to)
 }
 

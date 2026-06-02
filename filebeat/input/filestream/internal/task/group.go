@@ -27,6 +27,15 @@ import (
 	"golang.org/x/sync/semaphore"
 )
 
+// semaphoreWeight converts the task limit to a semaphore weight, capping at
+// math.MaxInt64 to satisfy gosec G115.
+func semaphoreWeight(limit uint64) int64 {
+	if limit > math.MaxInt64 {
+		return math.MaxInt64
+	}
+	return int64(limit)
+}
+
 type Group struct {
 	sem *semaphore.Weighted
 	wg  *sync.WaitGroup
@@ -73,7 +82,7 @@ func NewGroup(limit uint64, stopTimeout time.Duration, log Logger, errPrefix str
 
 	var sem *semaphore.Weighted
 	if limit > 0 {
-		sem = semaphore.NewWeighted(int64(min(limit, math.MaxInt64)))
+		sem = semaphore.NewWeighted(semaphoreWeight(limit))
 	}
 
 	return &Group{
