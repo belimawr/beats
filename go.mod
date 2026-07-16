@@ -2,6 +2,8 @@ module github.com/elastic/beats/v7
 
 go 1.25.9
 
+replace github.com/elastic/elastic-agent-autodiscover => github.com/belimawr/elastic-agent-autodiscover v0.2.2-0.20260716163651-43c4ceadd552
+
 require (
 	cloud.google.com/go/bigquery v1.74.0
 	cloud.google.com/go/monitoring v1.24.3
