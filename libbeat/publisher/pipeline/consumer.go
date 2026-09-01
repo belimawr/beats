@@ -94,17 +94,12 @@ func newEventConsumer(
 		c.run()
 	})
 
-	// queueReader is tracked in its own WaitGroup rather than wg.
-	// Previously this goroutine was left to run asynchronously because
-	// waiting on it risked deadlock: if the queue was not yet closed,
-	// queueReader could be blocked indefinitely in queue.Get, and joining
-	// it from consumer.close() would hang. All callers of consumer.close()
-	// (processOutputController.waitClose and the OTel equivalent) now close
-	// the queue before calling consumer.close(), so any in-flight queue.Get
-	// is guaranteed to return first. The two-WaitGroup split preserves the
-	// safe ordering: wg drains first (which closes queueReader.req), then
-	// queueReaderWg ensures the goroutine has fully exited before close()
-	// returns — preventing goroutine log calls after the caller has torn down.
+	// Track queueReader in its own WaitGroup so close() can wait for
+	// the main worker first. run() closes queueReader.req only after
+	// it leaves the select loop; queueReader cannot exit until that
+	// channel is closed, so a single WaitGroup would deadlock. After
+	// wg drains, queueReaderWg ensures the reader has stopped before
+	// close() returns.
 	c.queueReaderWg.Go(func() {
 		c.queueReader.run(c.logger)
 	})
