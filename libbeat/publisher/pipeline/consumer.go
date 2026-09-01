@@ -53,10 +53,8 @@ type eventConsumer struct {
 	// wg is released when the main eventConsumer worker goroutine returns.
 	wg sync.WaitGroup
 
-	// queueReaderWg is released when the queueReader goroutine returns.
-	// It is kept separate from wg because queueReader can only exit after
-	// eventConsumer.run() closes queueReader.req — which happens after wg
-	// is done — so combining them into one WaitGroup would deadlock.
+	// Released when the queueReader goroutine returns. Separate from
+	// wg so close() can wait for the two workers in order.
 	queueReaderWg sync.WaitGroup
 }
 
