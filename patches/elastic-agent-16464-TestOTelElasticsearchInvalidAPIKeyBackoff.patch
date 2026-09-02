@@ -1,0 +1,78 @@
+From 3953309786a6c6882ef9e439229e5bd30e401e4f Mon Sep 17 00:00:00 2001
+From: Cursor Agent <cursoragent@cursor.com>
+Date: Wed, 2 Sep 2026 18:49:49 +0000
+Subject: [PATCH] test(otel): stabilize
+ TestOTelElasticsearchInvalidAPIKeyBackoff on Windows
+
+The test raced on Windows CI: default filestream fingerprint (1KB) and
+a 10s scanner interval delayed harvest, then exponential retry backoff
+overflowed the 30s Eventually window. Pre-write a >1KB file, disable
+fingerprint, scan every 1s, and wait up to 90s.
+
+Relates https://github.com/elastic/elastic-agent/issues/16464
+
+Assisted-By: Cursor Grok 4.6
+---
+ testing/integration/ess/otel_test.go | 17 +++++++++++++----
+ 1 file changed, 13 insertions(+), 4 deletions(-)
+
+diff --git a/testing/integration/ess/otel_test.go b/testing/integration/ess/otel_test.go
+index 3647e8d..a27fdc0 100644
+--- a/testing/integration/ess/otel_test.go
++++ b/testing/integration/ess/otel_test.go
+@@ -1239,7 +1239,16 @@ func TestOTelElasticsearchInvalidAPIKeyBackoff(t *testing.T) {
+ 	mockESServer := httptest.NewServer(mux)
+ 	t.Cleanup(mockESServer.Close)
+ 
++	// Write the input before start so harvest does not race with agent startup.
++	// Disable fingerprint and use a 1s scan interval; the defaults (1KB / 10s)
++	// plus retry backoff overflow a short Eventually window on Windows CI.
+ 	inputPath := filepath.Join(t.TempDir(), "input.log")
++	const linePadding = 512
++	require.NoError(t, os.WriteFile(inputPath, fmt.Appendf(nil,
++		"Line 0 %s\nLine 1 %s\n",
++		strings.Repeat("x", linePadding),
++		strings.Repeat("x", linePadding),
++	), 0o600))
+ 
+ 	fixture, err := define.NewFixtureFromLocalBuild(t, define.Version())
+ 	require.NoError(t, err)
+@@ -1255,6 +1264,8 @@ inputs:
+           dataset: invalid_api_key_backoff
+         paths:
+           - {{.InputPath}}
++        prospector.scanner.fingerprint.enabled: false
++        prospector.scanner.check_interval: 1s
+     queue.mem.flush.timeout: 0s
+ outputs:
+   default:
+@@ -1282,7 +1293,7 @@ agent:
+ 		"MaxBackoff":     maxBackoff,
+ 	}))
+ 
+-	ctx, cancel := testcontext.WithDeadline(t, t.Context(), time.Now().Add(2*time.Minute))
++	ctx, cancel := testcontext.WithDeadline(t, t.Context(), time.Now().Add(4*time.Minute))
+ 	defer cancel()
+ 
+ 	require.NoError(t, fixture.Prepare(ctx))
+@@ -1300,8 +1311,6 @@ agent:
+ 		_ = cmd.Wait()
+ 	})
+ 
+-	integration.GenerateLogFile(t, inputPath, 100*time.Millisecond, 20)
+-
+ 	var requestTimes []time.Time
+ 	require.Eventually(t, func() bool {
+ 		mu.Lock()
+@@ -1312,7 +1321,7 @@ agent:
+ 		}
+ 		requestTimes = append([]time.Time(nil), bulkRequestTimes[:4]...)
+ 		return true
+-	}, 30*time.Second, 50*time.Millisecond, "expected a retried request with an invalid API key")
++	}, 90*time.Second, 50*time.Millisecond, "expected a retried request with an invalid API key")
+ 
+ 	mu.Lock()
+ 	keyWasSent := invalidKeyWasSent
+-- 
+2.43.0
+
