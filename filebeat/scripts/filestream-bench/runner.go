@@ -653,10 +653,12 @@ type Sample struct {
 	CPUPercent *float64        `json:"cpu_percent,omitempty"`
 	Stats      *StatsSnapshot  `json:"stats,omitempty"`
 	Inputs     *InputsSnapshot `json:"inputs,omitempty"`
-	MemStats   *MemStats       `json:"memstats,omitempty"`
-	Proc       *ProcStatus     `json:"proc,omitempty"`
-	Registry   *RegistryStats  `json:"registry,omitempty"`
-	Errors     []string        `json:"errors,omitempty"`
+	// MemStats is only present in metrics.ndjson files written by older
+	// harness versions that polled heap?debug=1 on every tick.
+	MemStats *MemStats      `json:"memstats,omitempty"`
+	Proc     *ProcStatus    `json:"proc,omitempty"`
+	Registry *RegistryStats `json:"registry,omitempty"`
+	Errors   []string       `json:"errors,omitempty"`
 }
 
 // ---------------------------------------------------------------------------
@@ -715,6 +717,11 @@ func (t *telemetry) memStats(ctx context.Context) (MemStats, error) {
 
 // collect gathers one sample. HTTP failures are recorded in Errors; /proc
 // and registry stats are collected regardless.
+//
+// heap?debug=1 is deliberately not polled here: it walks every heap profile
+// bucket and allocates ~1.4 MiB per call in Filebeat, which distorts the
+// measured heap. /stats already exposes HeapAlloc, Sys, TotalAlloc and
+// NextGC; full MemStats are captured with each profile instead.
 func (t *telemetry) collect(ctx context.Context) Sample {
 	s := Sample{Time: time.Now()}
 	addErr := func(src string, err error) { s.Errors = append(s.Errors, src+": "+err.Error()) }
@@ -734,11 +741,6 @@ func (t *telemetry) collect(ctx context.Context) Sample {
 			addErr("inputs", err)
 		} else {
 			s.Inputs = &in
-		}
-		if ms, err := t.memStats(ctx); err != nil {
-			addErr("heap", err)
-		} else {
-			s.MemStats = &ms
 		}
 	}
 
@@ -1095,8 +1097,10 @@ func pollMetrics(ctx context.Context, tel *telemetry, out io.Writer, interval ti
 	start time.Time, phase *phaseTracker, exited <-chan struct{}, latest chan Sample, logger *log.Logger,
 ) {
 	enc := json.NewEncoder(out)
+	// Filebeat's CPU counter starts at 0 with the process, so the first sample
+	// reports the average since start instead of nothing.
 	var prevCPU int64
-	var prevTime time.Time
+	prevTime := start
 
 	sample := func() {
 		s := tel.collect(ctx)

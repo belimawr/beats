@@ -32,12 +32,15 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 )
 
 const (
-	pprofNodeCount = 30
-	pprofTimeout   = 2 * time.Minute
+	pprofNodeCount   = 30
+	pprofTimeout     = 2 * time.Minute
+	pprofConcurrency = 4
+	retainerTopN     = 10
 )
 
 // Log messages used as stage markers.
@@ -244,17 +247,23 @@ var metricDefs = []metricDef{
 		}
 		return float64(s.MemStats.HeapInuse), true
 	}},
-	{"heap_alloc", true, func(s Sample) (float64, bool) {
-		if s.MemStats == nil {
-			return 0, false
-		}
-		return float64(s.MemStats.HeapAlloc), true
-	}},
+	{"heap_alloc", true, sampleHeapAlloc},
+	// Without per-tick MemStats this is /stats memory_sys (runtime Sys), which
+	// also covers stacks and runtime metadata, so it is >= the real HeapSys.
 	{"heap_sys", true, func(s Sample) (float64, bool) {
-		if s.MemStats == nil {
+		switch {
+		case s.MemStats != nil:
+			return float64(s.MemStats.HeapSys), true
+		case s.Stats != nil:
+			return float64(s.Stats.MemorySys), true
+		}
+		return 0, false
+	}},
+	{"gc_next", true, func(s Sample) (float64, bool) {
+		if s.Stats == nil {
 			return 0, false
 		}
-		return float64(s.MemStats.HeapSys), true
+		return float64(s.Stats.GCNext), true
 	}},
 	{"heap_objects", false, func(s Sample) (float64, bool) {
 		if s.MemStats == nil {
@@ -336,6 +345,56 @@ var metricDefs = []metricDef{
 	}},
 }
 
+// sampleHeapAlloc returns the Go live heap: MemStats.HeapAlloc from older
+// metrics files, otherwise /stats memory_alloc (same runtime value).
+func sampleHeapAlloc(s Sample) (float64, bool) {
+	switch {
+	case s.MemStats != nil:
+		return float64(s.MemStats.HeapAlloc), true
+	case s.Stats != nil:
+		return float64(s.Stats.MemoryAlloc), true
+	}
+	return 0, false
+}
+
+// backfillCPUPercent sets CPUPercent on samples with /stats but no recorded
+// value, using a zero baseline at process start (Filebeat's CPU counter
+// starts at 0). Older metrics.ndjson files lack it on the first sample, which
+// covers the whole ingestion burst of short runs.
+func backfillCPUPercent(samples []Sample, start time.Time) {
+	prevTime := start
+	prevCPU := int64(0)
+	for i := range samples {
+		s := &samples[i]
+		if s.Stats == nil {
+			continue
+		}
+		if s.CPUPercent == nil && !prevTime.IsZero() && s.Stats.CPUTotalMS >= prevCPU {
+			if dt := s.Time.Sub(prevTime).Seconds(); dt > 0 {
+				s.CPUPercent = new(float64(s.Stats.CPUTotalMS-prevCPU) / (dt * 1000) * 100)
+			}
+		}
+		prevTime, prevCPU = s.Time, s.Stats.CPUTotalMS
+	}
+}
+
+// profileMetricDefs aggregate the MemStats captured with each profile.
+var profileMetricDefs = []struct {
+	name  string
+	bytes bool
+	get   func(ProfilePoint) (float64, bool)
+}{
+	{"profile_heap_inuse", true, func(p ProfilePoint) (float64, bool) { return float64(p.HeapInuse), p.HasMemStats }},
+	{"profile_heap_alloc", true, func(p ProfilePoint) (float64, bool) { return float64(p.HeapAlloc), p.HasMemStats }},
+	{"profile_heap_objects", false, func(p ProfilePoint) (float64, bool) { return float64(p.HeapObjects), p.HasMemStats }},
+	{"profile_pprof_inuse_space", true, func(p ProfilePoint) (float64, bool) {
+		if p.PprofInuseBytes == nil {
+			return 0, false
+		}
+		return *p.PprofInuseBytes, true
+	}},
+}
+
 func maxPtr(cur *float64, v float64) *float64 {
 	if cur == nil || v > *cur {
 		return new(v)
@@ -343,36 +402,61 @@ func maxPtr(cur *float64, v float64) *float64 {
 	return cur
 }
 
-func aggregateMetrics(samples []Sample) map[string]MetricStat {
-	out := make(map[string]MetricStat, len(metricDefs))
+// statPoint is one observation of a metric.
+type statPoint struct {
+	elapsed float64
+	phase   string
+	v       float64
+}
+
+func aggregatePoints(points []statPoint) (MetricStat, bool) {
+	var st MetricStat
+	var steadySum float64
+	var steadyN int
+	for _, p := range points {
+		if st.Peak == nil || p.v > *st.Peak {
+			st.Peak, st.PeakAtS = new(p.v), new(p.elapsed)
+		}
+		st.Last = new(p.v)
+		switch p.phase {
+		case phaseStarting, phaseIngesting:
+			st.IngestPeak = maxPtr(st.IngestPeak, p.v)
+		case phaseSteady:
+			st.SteadyMax = maxPtr(st.SteadyMax, p.v)
+			steadySum += p.v
+			steadyN++
+		case phaseShutdown, phaseExited:
+			st.ShutdownPeak = maxPtr(st.ShutdownPeak, p.v)
+		}
+	}
+	if steadyN > 0 {
+		st.SteadyMean = new(steadySum / float64(steadyN))
+	}
+	return st, st.Peak != nil
+}
+
+func aggregateMetrics(samples []Sample, profiles []ProfilePoint) map[string]MetricStat {
+	out := make(map[string]MetricStat, len(metricDefs)+len(profileMetricDefs))
+	points := make([]statPoint, 0, len(samples))
 	for _, def := range metricDefs {
-		var st MetricStat
-		var steadySum float64
-		var steadyN int
+		points = points[:0]
 		for _, s := range samples {
-			v, ok := def.get(s)
-			if !ok {
-				continue
-			}
-			if st.Peak == nil || v > *st.Peak {
-				st.Peak, st.PeakAtS = new(v), new(s.ElapsedSec)
-			}
-			st.Last = new(v)
-			switch s.Phase {
-			case phaseStarting, phaseIngesting:
-				st.IngestPeak = maxPtr(st.IngestPeak, v)
-			case phaseSteady:
-				st.SteadyMax = maxPtr(st.SteadyMax, v)
-				steadySum += v
-				steadyN++
-			case phaseShutdown, phaseExited:
-				st.ShutdownPeak = maxPtr(st.ShutdownPeak, v)
+			if v, ok := def.get(s); ok {
+				points = append(points, statPoint{s.ElapsedSec, s.Phase, v})
 			}
 		}
-		if steadyN > 0 {
-			st.SteadyMean = new(steadySum / float64(steadyN))
+		if st, ok := aggregatePoints(points); ok {
+			out[def.name] = st
 		}
-		if st.Peak != nil {
+	}
+	for _, def := range profileMetricDefs {
+		points = points[:0]
+		for _, p := range profiles {
+			if v, ok := def.get(p); ok {
+				points = append(points, statPoint{p.ElapsedS, p.Phase, v})
+			}
+		}
+		if st, ok := aggregatePoints(points); ok {
 			out[def.name] = st
 		}
 	}
@@ -381,12 +465,30 @@ func aggregateMetrics(samples []Sample) map[string]MetricStat {
 
 // PprofTop is the `go tool pprof -top` output for one heap profile.
 type PprofTop struct {
+	Seq       int     `json:"seq"`
 	Label     string  `json:"label"`
 	File      string  `json:"file"`
 	ElapsedS  float64 `json:"elapsed_s"`
 	HeapInuse uint64  `json:"heap_inuse,omitempty"`
-	Output    string  `json:"output,omitempty"`
-	Error     string  `json:"error,omitempty"`
+	// TotalInuseBytes is the "of X total" inuse_space reported by pprof.
+	TotalInuseBytes float64    `json:"total_inuse_bytes,omitempty"`
+	Rows            []PprofRow `json:"rows,omitempty"`
+	Output          string     `json:"output,omitempty"`
+	Error           string     `json:"error,omitempty"`
+}
+
+// ProfilePoint is the heap state at one profile capture.
+type ProfilePoint struct {
+	Seq             int      `json:"seq"`
+	Label           string   `json:"label"`
+	Phase           string   `json:"phase"`
+	ElapsedS        float64  `json:"elapsed_s"`
+	HasMemStats     bool     `json:"has_memstats"`
+	HeapInuse       uint64   `json:"heap_inuse"`
+	HeapAlloc       uint64   `json:"heap_alloc"`
+	HeapObjects     uint64   `json:"heap_objects"`
+	NumGC           uint64   `json:"num_gc"`
+	PprofInuseBytes *float64 `json:"pprof_inuse_bytes,omitempty"`
 }
 
 // Summary is written to summary.json and rendered into summary.md.
@@ -404,7 +506,11 @@ type Summary struct {
 	Samples       int                   `json:"samples"`
 	Profiles      int                   `json:"profiles"`
 	ProfileErrors int                   `json:"profile_errors"`
+	ProfileHeap   []ProfilePoint        `json:"profile_heap,omitempty"`
 	HeapTops      []PprofTop            `json:"heap_tops,omitempty"`
+	Retainers     []Retainer            `json:"retainers,omitempty"`
+	Charts        []ChartFile           `json:"charts,omitempty"`
+	ChartsError   string                `json:"charts_error,omitempty"`
 }
 
 // readNDJSON decodes every line of path into T. Missing files yield nil.
@@ -463,24 +569,93 @@ func selectHeapProfiles(recs []ProfileRecord) []ProfileRecord {
 	return out
 }
 
-func pprofTop(ctx context.Context, goBin, runDir string, rec ProfileRecord) PprofTop {
-	top := PprofTop{Label: rec.Label, File: rec.HeapFile, ElapsedS: rec.ElapsedSec}
-	if rec.MemStats != nil {
-		top.HeapInuse = rec.MemStats.HeapInuse
-	}
+// runPprofTop runs `go tool pprof -top -sample_index=inuse_space`.
+func runPprofTop(ctx context.Context, goBin, heapFile string, nodeCount int) (string, error) {
 	ctx, cancel := context.WithTimeout(ctx, pprofTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, goBin, "tool", "pprof", "-top", //nolint:gosec // go binary and profile path are harness inputs
-		fmt.Sprintf("-nodecount=%d", pprofNodeCount), "-sample_index=inuse_space",
-		filepath.Join(runDir, rec.HeapFile))
+		fmt.Sprintf("-nodecount=%d", nodeCount), "-sample_index=inuse_space", heapFile)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()
-	top.Output = string(out)
 	if err != nil {
-		top.Error = strings.TrimSpace(err.Error() + ": " + stderr.String())
+		return string(out), fmt.Errorf("%w: %s", err, strings.TrimSpace(stderr.String()))
 	}
+	return string(out), nil
+}
+
+func pprofTop(ctx context.Context, goBin, runDir string, rec ProfileRecord) PprofTop {
+	top := PprofTop{Seq: rec.Seq, Label: rec.Label, File: rec.HeapFile, ElapsedS: rec.ElapsedSec}
+	if rec.MemStats != nil {
+		top.HeapInuse = rec.MemStats.HeapInuse
+	}
+	out, err := runPprofTop(ctx, goBin, filepath.Join(runDir, rec.HeapFile), pprofNodeCount)
+	top.Output = out
+	if err != nil {
+		top.Error = err.Error()
+		return top
+	}
+	total, rows, err := parsePprofTop(out)
+	if err != nil {
+		top.Error = err.Error()
+	}
+	top.TotalInuseBytes, top.Rows = total, rows
 	return top
+}
+
+// profilePoints converts profile records into heap points. pprof inuse_space
+// totals are taken from tops when available, otherwise computed with a
+// bounded number of concurrent `go tool pprof` invocations.
+func profilePoints(ctx context.Context, logger *log.Logger, goBin, runDir string, recs []ProfileRecord, tops []PprofTop) []ProfilePoint {
+	known := make(map[int]float64, len(tops))
+	for _, t := range tops {
+		if t.Error == "" && t.TotalInuseBytes > 0 {
+			known[t.Seq] = t.TotalInuseBytes
+		}
+	}
+	var points []ProfilePoint
+	var heapFiles []string
+	for _, r := range recs {
+		if r.HeapFile == "" {
+			continue
+		}
+		p := ProfilePoint{Seq: r.Seq, Label: r.Label, Phase: r.Phase, ElapsedS: r.ElapsedSec}
+		if r.MemStats != nil {
+			p.HasMemStats = true
+			p.HeapInuse, p.HeapAlloc = r.MemStats.HeapInuse, r.MemStats.HeapAlloc
+			p.HeapObjects, p.NumGC = r.MemStats.HeapObjects, r.MemStats.NumGC
+		}
+		if v, ok := known[r.Seq]; ok {
+			p.PprofInuseBytes = new(v)
+		}
+		points = append(points, p)
+		heapFiles = append(heapFiles, r.HeapFile)
+	}
+
+	sem := make(chan struct{}, pprofConcurrency)
+	var wg sync.WaitGroup
+	for i := range points {
+		if points[i].PprofInuseBytes != nil {
+			continue
+		}
+		wg.Go(func() {
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			out, err := runPprofTop(ctx, goBin, filepath.Join(runDir, heapFiles[i]), 1)
+			if err != nil {
+				logger.Printf("report: pprof total %s: %v", heapFiles[i], err)
+				return
+			}
+			total, _, err := parsePprofTop(out)
+			if err != nil {
+				logger.Printf("report: pprof total %s: %v", heapFiles[i], err)
+				return
+			}
+			points[i].PprofInuseBytes = new(total)
+		})
+	}
+	wg.Wait()
+	return points
 }
 
 // BuildReport parses run artefacts in runDir and writes summary.json and
@@ -503,9 +678,10 @@ func BuildReport(ctx context.Context, logger *log.Logger, runDir, goBin string, 
 	if err != nil {
 		logger.Printf("report: %v", err)
 	}
+	// Before aggregateMetrics and generateCharts so summary and charts agree.
+	backfillCPUPercent(samples, s.Run.StartTime)
 	s.Stages = computeStages(s.Run, s.Markers, samples)
 	s.Samples = len(samples)
-	s.Metrics = aggregateMetrics(samples)
 	for _, smp := range slices.Backward(samples) {
 		if smp.Stats != nil {
 			s.FinalStats = smp.Stats
@@ -532,6 +708,16 @@ func BuildReport(ctx context.Context, logger *log.Logger, runDir, goBin string, 
 	}
 	for _, rec := range selectHeapProfiles(recs) {
 		s.HeapTops = append(s.HeapTops, pprofTop(ctx, goBin, runDir, rec))
+	}
+	s.ProfileHeap = profilePoints(ctx, logger, goBin, runDir, recs, s.HeapTops)
+	s.Metrics = aggregateMetrics(samples, s.ProfileHeap)
+	s.Retainers = buildRetainers(s.HeapTops, retainerTopN)
+
+	charts, err := generateCharts(ctx, runDir, &s, samples)
+	s.Charts = charts
+	if err != nil {
+		s.ChartsError = err.Error()
+		logger.Printf("report: warning: charts: %v", err)
 	}
 
 	if err := writeJSONAtomic(filepath.Join(runDir, "summary.json"), s); err != nil {
@@ -608,16 +794,49 @@ func renderMarkdown(s Summary) string {
 		b.WriteString("\n")
 	}
 
-	b.WriteString("\n## Resources\n\n| metric | peak | peak at (s) | ingest peak | steady mean | steady max | shutdown peak | last |\n|---|---|---|---|---|---|---|---|\n")
-	for _, def := range metricDefs {
-		m, ok := s.Metrics[def.name]
+	b.WriteString("\n## Key metrics\n\n")
+	for _, k := range []struct {
+		name, label string
+		bytes       bool
+	}{
+		{"heap_alloc", "Go heap alloc", true},
+		{"rss_anon", "RSS anon", true},
+		{"vm_rss", "RSS total", true},
+		{"cpu_percent", "CPU % (100 = 1 core)", false},
+		{"goroutines", "goroutines", false},
+		{"registry_total_bytes", "registry on disk", true},
+		{"profile_heap_inuse", "HeapInuse at profiles", true},
+		{"profile_pprof_inuse_space", "pprof inuse_space at profiles", true},
+	} {
+		m, ok := s.Metrics[k.name]
 		if !ok {
 			continue
 		}
-		fmt.Fprintf(&b, "| %s | %s | %s | %s | %s | %s | %s | %s |\n", def.name,
-			fmtMetric(m.Peak, def.bytes), fmtSec(m.PeakAtS), fmtMetric(m.IngestPeak, def.bytes),
-			fmtMetric(m.SteadyMean, def.bytes), fmtMetric(m.SteadyMax, def.bytes),
-			fmtMetric(m.ShutdownPeak, def.bytes), fmtMetric(m.Last, def.bytes))
+		fmt.Fprintf(&b, "- %s: peak %s at %ss, steady mean %s, last %s\n", k.label,
+			fmtMetric(m.Peak, k.bytes), fmtSec(m.PeakAtS), fmtMetric(m.SteadyMean, k.bytes), fmtMetric(m.Last, k.bytes))
+	}
+	fmt.Fprintf(&b, "- profiles: %d captured, %d with errors; samples: %d (full data in summary.json)\n",
+		s.Profiles, s.ProfileErrors, s.Samples)
+	for _, t := range s.HeapTops {
+		fmt.Fprintf(&b, "- heap profile %s: `%s` at %.0fs, HeapInuse %.1f MiB, pprof inuse_space %.1f MiB\n",
+			t.Label, t.File, t.ElapsedS, float64(t.HeapInuse)/(1<<20), t.TotalInuseBytes/(1<<20))
+		if t.Error != "" {
+			fmt.Fprintf(&b, "  - pprof error: %s\n", t.Error)
+		}
+	}
+
+	b.WriteString("\n## Charts\n\n")
+	for _, c := range s.Charts {
+		fmt.Fprintf(&b, "![%s](%s)\n\n", c.Title, c.Path)
+	}
+	if s.ChartsError != "" {
+		fmt.Fprintf(&b, "Charts incomplete: %s\n\n", s.ChartsError)
+	}
+	if !hasChart(s.Charts, chartRetainers) && len(s.Retainers) > 0 {
+		b.WriteString("Top in-use heap retainers (MiB, peak / pre-shutdown):\n\n")
+		for _, r := range s.Retainers[:min(5, len(s.Retainers))] {
+			fmt.Fprintf(&b, "- `%s`: %s / %s\n", r.Short, fmtMiB(r.PeakMiB), fmtMiB(r.PreShutdownMiB))
+		}
 	}
 
 	if f := s.FinalStats; f != nil {
@@ -632,17 +851,12 @@ func renderMarkdown(s Summary) string {
 		fmt.Fprintf(&b, "- inputs events/bytes processed: %d/%d, files opened/closed: %d/%d\n",
 			in.EventsProcessed, in.BytesProcessed, in.FilesOpened, in.FilesClosed)
 	}
-
-	fmt.Fprintf(&b, "\n## Profiles\n\n%d captured, %d with errors. Samples: %d.\n", s.Profiles, s.ProfileErrors, s.Samples)
-	for _, t := range s.HeapTops {
-		fmt.Fprintf(&b, "\n### Heap top (%s) `%s` at %.0fs, HeapInuse %.1f MiB\n\n",
-			t.Label, t.File, t.ElapsedS, float64(t.HeapInuse)/(1<<20))
-		if t.Error != "" {
-			fmt.Fprintf(&b, "error: %s\n", t.Error)
-		}
-		if t.Output != "" {
-			fmt.Fprintf(&b, "```text\n%s```\n", t.Output)
-		}
-	}
 	return b.String()
+}
+
+func fmtMiB(v *float64) string {
+	if v == nil {
+		return "-"
+	}
+	return fmt.Sprintf("%.1f", *v)
 }

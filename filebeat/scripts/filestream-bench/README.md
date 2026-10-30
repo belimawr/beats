@@ -110,11 +110,26 @@ harness immediately (Filebeat may keep running).
 | `filebeat.yml` | generated config |
 | `filebeat.stdout`, `filebeat.stderr` | process output |
 | `logs/filebeat*.ndjson` | Filebeat logs |
-| `metrics.ndjson` | one sample per tick: `/stats`, `/inputs/`, `heap?debug=1` MemStats, `/proc/<pid>/status`, registry sizes, CPU% |
-| `profiles.ndjson` | one record per capture |
+| `metrics.ndjson` | one sample per tick: `/stats`, `/inputs/`, `/proc/<pid>/status`, registry sizes, CPU% |
+| `profiles.ndjson` | one record per capture, including `heap?debug=1` MemStats |
 | `profiles/NNN-<label>-<elapsed>s/` | `heap.pb.gz`, `goroutine.txt` (debug=2), `cpu.pb.gz` |
 | `run.json` | timeline: start, ready, ingested, SIGTERM, exit |
-| `summary.json`, `summary.md` | stage timings, peak/steady/shutdown resources, final counters, `go tool pprof -top -sample_index=inuse_space` for the peak and pre-shutdown heaps |
+| `summary.json` | full report data: stage timings, per-metric peak/steady/shutdown stats, per-profile heap points, parsed `go tool pprof -top -sample_index=inuse_space` rows, top retainers |
+| `summary.md` | stage timings, key metric bullets, embedded charts |
+| `charts/*.svg` | charts embedded in `summary.md`, plus their gnuplot scripts (`*.gp`) and data (`*.dat`) |
+
+Charts (require `gnuplot` on `PATH`; without it, or if it fails, the report
+is still written with a warning and `charts_error` in `summary.json`):
+
+- `memory-and-ingestion.svg`: heap_alloc, RssAnon, VmRSS and per-profile
+  HeapInuse / pprof inuse_space (MiB) vs. harvester_closed and files_unique
+- `throughput-and-harvesters.svg`: ACK rate vs. active readers, waiting
+  harvesters and goroutines
+- `cpu-and-registry-io.svg`: CPU% vs. registry file sizes
+- `heap-retainers.svg`: flat inuse_space of the union of the top 10
+  functions of the peak and pre-shutdown heap profiles
+
+Vertical dashed lines mark ingestion completion and SIGTERM.
 
 Stage definitions:
 
@@ -125,6 +140,11 @@ Stage definitions:
 
 Notes:
 
+- `heap?debug=1` is only fetched with each profile, never on the metrics tick:
+  it walks every heap profile bucket and allocates ~1.4 MiB per call in
+  Filebeat, distorting the measured heap. Per-tick `heap_alloc` / `heap_sys`
+  come from `/stats` `beat.memstats.memory_alloc` / `memory_sys`
+  (`memory_sys` is runtime `Sys`, so it is >= `HeapSys`).
 - `PauseTotalNs` is not part of the `heap?debug=1` footer; it is the sum of the
   `PauseNs` ring buffer and only exact while `NumGC <= 256`
   (`pause_total_exact`).

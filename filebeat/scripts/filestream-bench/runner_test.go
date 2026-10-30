@@ -27,6 +27,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -473,7 +474,9 @@ func TestTelemetryCollect(t *testing.T) {
 	mux.HandleFunc("/inputs/", func(w http.ResponseWriter, _ *http.Request) {
 		fmt.Fprint(w, `[{"id":"bench-filestream","input":"filestream","events_processed_total":5}]`)
 	})
+	var heapCalls atomic.Int32
 	mux.HandleFunc("/debug/pprof/heap", func(w http.ResponseWriter, r *http.Request) {
+		heapCalls.Add(1)
 		assert.Equal(t, "1", r.URL.Query().Get("debug"), "telemetry must request debug=1")
 		fmt.Fprint(w, heapDebug1)
 	})
@@ -493,9 +496,14 @@ func TestTelemetryCollect(t *testing.T) {
 	assert.Equal(t, int64(990), s.Stats.OutputEventsAcked, "acked from /stats")
 	require.NotNil(t, s.Inputs, "inputs collected")
 	assert.Equal(t, int64(5), s.Inputs.EventsProcessed, "events from /inputs")
-	require.NotNil(t, s.MemStats, "memstats collected")
-	assert.Equal(t, uint64(2097152), s.MemStats.HeapInuse, "HeapInuse from heap?debug=1")
+	assert.Nil(t, s.MemStats, "periodic samples must not carry heap?debug=1 memstats")
+	assert.Zero(t, heapCalls.Load(), "periodic collection must not poll /debug/pprof/heap")
 	require.NotNil(t, s.Registry, "registry stats collected")
+
+	ms, err := tel.memStats(t.Context())
+	require.NoError(t, err, "memstats for profile captures")
+	assert.Equal(t, uint64(2097152), ms.HeapInuse, "HeapInuse from heap?debug=1")
+	assert.Equal(t, int32(1), heapCalls.Load(), "memStats polls the heap endpoint once")
 	if _, err := os.Stat("/proc/self/status"); err == nil {
 		assert.NotNil(t, s.Proc, "proc stats collected on Linux")
 	}

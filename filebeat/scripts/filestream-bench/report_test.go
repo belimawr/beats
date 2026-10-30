@@ -20,7 +20,9 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"encoding/xml"
 	"fmt"
+	"math"
 	"net"
 	"net/http"
 	"net/http/pprof"
@@ -116,7 +118,8 @@ func fakeFilebeat() int {
 		if time.Since(start) > 500*time.Millisecond {
 			acked, running = events, 0
 		}
-		fmt.Fprintf(w, `{"beat":{"cpu":{"total":{"time":{"ms":%d}}},"runtime":{"goroutines":10}},`+
+		fmt.Fprintf(w, `{"beat":{"cpu":{"total":{"time":{"ms":%d}}},"runtime":{"goroutines":10},`+
+			`"memstats":{"memory_alloc":4194304,"memory_sys":16777216}},`+
 			`"filebeat":{"events":{"active":0,"added":%d,"done":%d},"harvester":{"started":%d,"closed":%d,"running":%d},`+
 			`"filestream":{"files_matched":%d,"files_unique":%d}},"libbeat":{"output":{"events":{"acked":%d}}}}`,
 			time.Since(start).Milliseconds()/10, acked, acked, files, files, running, files, files, acked)
@@ -246,13 +249,32 @@ func TestRunEndToEndWithFakeFilebeat(t *testing.T) {
 	assert.NotNil(t, s.Stages.RegistryInitS, "registry init stage")
 	assert.NotNil(t, s.Stages.ShutdownLogS, "shutdown log stage")
 	assert.Equal(t, 1, s.Markers.Warnings, "warning count")
-	assert.Contains(t, s.Metrics, "heap_inuse", "heap metric aggregated")
+	assert.NotContains(t, s.Metrics, "heap_inuse", "periodic samples carry no heap?debug=1 memstats")
 	assert.Contains(t, s.Metrics, "cpu_percent", "cpu metric aggregated")
-	assert.NotNil(t, s.Metrics["heap_inuse"].SteadyMean, "steady heap metric")
+	require.Contains(t, s.Metrics, "heap_alloc", "heap_alloc from /stats memstats")
+	assert.NotNil(t, s.Metrics["heap_alloc"].SteadyMean, "steady heap_alloc metric")
+	assert.Contains(t, s.Metrics, "profile_heap_inuse", "HeapInuse from profile captures")
+	require.NotEmpty(t, s.ProfileHeap, "profile heap points")
+	for _, p := range s.ProfileHeap {
+		assert.True(t, p.HasMemStats, "profile %d has memstats", p.Seq)
+		assert.NotNil(t, p.PprofInuseBytes, "profile %d has pprof inuse_space total", p.Seq)
+	}
 	require.NotEmpty(t, s.HeapTops, "heap tops computed")
 	for _, top := range s.HeapTops {
 		assert.Empty(t, top.Error, "pprof error for %s", top.File)
 		assert.Contains(t, top.Output, "flat", "pprof -top output for %s", top.File)
+		assert.NotEmpty(t, top.Rows, "pprof -top rows parsed for %s", top.File)
+	}
+	assert.NotContains(t, string(md), "```", "summary.md must not embed raw pprof output")
+	if _, err := exec.LookPath("gnuplot"); err == nil {
+		assert.Empty(t, s.ChartsError, "chart generation errors")
+		for _, name := range []string{chartMemory, chartThroughput, chartCPU} {
+			assert.True(t, hasChart(s.Charts, name), "chart %s generated", name)
+			assert.Contains(t, string(md), fmt.Sprintf("![%s](charts/%s.svg)", chartTitles[name], name),
+				"summary.md embeds %s", name)
+		}
+	} else {
+		assert.Contains(t, s.ChartsError, "gnuplot not found", "missing gnuplot reported, not fatal")
 	}
 
 	t.Run("keep registry", func(t *testing.T) {
@@ -378,7 +400,7 @@ func TestAggregateMetrics(t *testing.T) {
 		{Phase: phaseShutdown, ElapsedSec: 5, MemStats: &MemStats{HeapInuse: 250}},
 		{Phase: phaseExited, ElapsedSec: 6},
 	}
-	m := aggregateMetrics(samples)
+	m := aggregateMetrics(samples, nil)
 	h := m["heap_inuse"]
 	require.NotNil(t, h.Peak, "heap peak")
 	assert.InDelta(t, 300, *h.Peak, 0, "heap peak value")
@@ -390,4 +412,281 @@ func TestAggregateMetrics(t *testing.T) {
 	assert.InDelta(t, 15, *c.SteadyMean, 1e-9, "cpu steady mean")
 	assert.Nil(t, c.ShutdownPeak, "no shutdown CPU samples")
 	assert.NotContains(t, m, "vm_rss", "metrics without samples are omitted")
+
+	statsOnly := []Sample{
+		{Phase: phaseSteady, ElapsedSec: 1, Stats: &StatsSnapshot{MemoryAlloc: 10 << 20, MemorySys: 40 << 20}},
+		{Phase: phaseSteady, ElapsedSec: 2, Stats: &StatsSnapshot{MemoryAlloc: 30 << 20, MemorySys: 50 << 20}},
+	}
+	pprofInuse := float64(7 << 20)
+	profiles := []ProfilePoint{
+		{Seq: 1, Phase: phaseIngesting, ElapsedS: 1, HasMemStats: true, HeapInuse: 64 << 20, PprofInuseBytes: &pprofInuse},
+		{Seq: 2, Phase: phaseSteady, ElapsedS: 2},
+	}
+	m = aggregateMetrics(statsOnly, profiles)
+	require.Contains(t, m, "heap_alloc", "heap_alloc falls back to /stats memory_alloc")
+	assert.InDelta(t, 30<<20, *m["heap_alloc"].Peak, 0, "heap_alloc peak from /stats")
+	require.Contains(t, m, "heap_sys", "heap_sys falls back to /stats memory_sys")
+	assert.InDelta(t, 50<<20, *m["heap_sys"].Peak, 0, "heap_sys peak from /stats")
+	assert.NotContains(t, m, "heap_inuse", "no periodic HeapInuse without memstats")
+	require.Contains(t, m, "profile_heap_inuse", "HeapInuse from profiles")
+	assert.InDelta(t, 64<<20, *m["profile_heap_inuse"].Peak, 0, "profile HeapInuse peak")
+	require.Contains(t, m, "profile_pprof_inuse_space", "pprof inuse_space from profiles")
+	assert.InDelta(t, pprofInuse, *m["profile_pprof_inuse_space"].Peak, 0, "pprof inuse_space peak")
+}
+
+const pprofTopOutput = `File: filebeat
+Build ID: f7325af9f58d92cd7a1bcbab09058f31ae4386a0
+Type: inuse_space
+Time: 2026-10-30 15:10:07 EDT
+Showing nodes accounting for 63.10MB, 96.93% of 65.10MB total
+Dropped 12 nodes (cum <= 0.33MB)
+Showing top 30 nodes out of 192
+      flat  flat%   sum%        cum   cum%
+   15.24MB 23.40% 23.40%    15.24MB 23.40%  github.com/elastic/beats/v7/libbeat/reader/readfile.poolForSize.func1
+   11.61MB 17.83% 41.23%    11.61MB 17.83%  github.com/elastic/beats/v7/libbeat/common/streambuf.(*Buffer).doAppend (inline)
+  512.01kB  0.77% 42.00%     1.16MB  1.78%  github.com/elastic/beats/v7/libbeat/publisher/queue/memqueue.newQueue[go.shape.struct { Content int }]
+       3MB  4.61% 46.61%    15.61MB 23.98%  github.com/elastic/beats/v7/libbeat/reader/readfile.(*FileMetaReader).Next
+         0     0% 46.61%     8.50MB 13.06%  main.main
+`
+
+func TestParsePprofSize(t *testing.T) {
+	tests := []struct {
+		in   string
+		want float64
+		err  bool
+	}{
+		{in: "0", want: 0},
+		{in: "512B", want: 512},
+		{in: "512.01kB", want: 512.01 * 1024},
+		{in: "1.50MB", want: 1.5 * 1024 * 1024},
+		{in: "3MB", want: 3 * 1024 * 1024},
+		{in: "2GB", want: 2 << 30},
+		{in: "  7kB ", want: 7 * 1024},
+		{in: "1.5XB", err: true},
+		{in: "MB", err: true},
+	}
+	for _, tc := range tests {
+		got, err := parsePprofSize(tc.in)
+		if tc.err {
+			assert.Error(t, err, "parsePprofSize(%q) must fail", tc.in)
+			continue
+		}
+		require.NoError(t, err, "parsePprofSize(%q)", tc.in)
+		assert.InDelta(t, tc.want, got, 1e-6, "parsePprofSize(%q)", tc.in)
+	}
+}
+
+func TestParsePprofTop(t *testing.T) {
+	total, rows, err := parsePprofTop(pprofTopOutput)
+	require.NoError(t, err, "parse pprof -top output")
+	assert.InDelta(t, 65.10*1024*1024, total, 1e-6, "total inuse_space from header")
+	require.Len(t, rows, 5, "one row per node line")
+
+	assert.Equal(t, "github.com/elastic/beats/v7/libbeat/reader/readfile.poolForSize.func1", rows[0].Name, "row 0 name")
+	assert.InDelta(t, 15.24*1024*1024, rows[0].FlatBytes, 1e-6, "row 0 flat")
+	assert.Equal(t, "readfile.poolForSize.func1", rows[0].Short, "row 0 short name")
+
+	assert.Equal(t, "github.com/elastic/beats/v7/libbeat/common/streambuf.(*Buffer).doAppend", rows[1].Name,
+		"(inline) suffix stripped")
+
+	assert.InDelta(t, 512.01*1024, rows[2].FlatBytes, 1e-6, "kB flat value")
+	assert.InDelta(t, 1.16*1024*1024, rows[2].CumBytes, 1e-6, "cum value")
+	assert.Equal(t, "memqueue.newQueue", rows[2].Short, "generic type arguments dropped")
+
+	assert.InDelta(t, 3*1024*1024, rows[3].FlatBytes, 1e-6, "integer MB flat value")
+	assert.Zero(t, rows[4].FlatBytes, "zero flat value")
+	assert.InDelta(t, 8.50*1024*1024, rows[4].CumBytes, 1e-6, "cum value for zero-flat row")
+
+	_, _, err = parsePprofTop("no header here\n")
+	assert.Error(t, err, "output without total must fail")
+}
+
+func TestShortFuncName(t *testing.T) {
+	tests := map[string]string{
+		"main.main": "main.main",
+		"github.com/elastic/beats/v7/libbeat/common/streambuf.(*Buffer).doAppend": "streambuf.(*Buffer).doAppend",
+		"pkg/a.F[go.shape.struct { X github.com/x/y.T }]":                         "a.F",
+		"github.com/x/y.G[...].func1":                                             "y.G.func1",
+	}
+	for in, want := range tests {
+		assert.Equal(t, want, shortFuncName(in), "shortFuncName(%q)", in)
+	}
+	long := shortFuncName("pkg." + strings.Repeat("x", 200))
+	assert.Len(t, []rune(long), maxShortName, "long names truncated")
+	assert.True(t, strings.HasSuffix(long, "..."), "truncated names end with an ellipsis")
+}
+
+func TestBuildRetainers(t *testing.T) {
+	row := func(name string, flatMiB float64) PprofRow {
+		return PprofRow{Name: name, Short: shortFuncName(name), FlatBytes: flatMiB * mib}
+	}
+	tops := []PprofTop{
+		{Label: "sched", Rows: []PprofRow{row("pkg.ignored", 100)}},
+		{Label: "peak", Rows: []PprofRow{row("pkg.a", 10), row("pkg.b", 5), row("pkg.zero", 0), row("pkg.c", 1)}},
+		{Label: "pre-shutdown", Rows: []PprofRow{row("pkg.d", 20), row("pkg.a", 2)}},
+	}
+	rets := buildRetainers(tops, 3)
+	names := make([]string, 0, len(rets))
+	for _, r := range rets {
+		names = append(names, r.Name)
+	}
+	assert.Equal(t, []string{"pkg.d", "pkg.a", "pkg.b"}, names,
+		"union of each profile's top 3 with flat > 0, sorted by max value")
+	require.NotNil(t, rets[0].PeakMiB, "pkg.d peak value")
+	assert.InDelta(t, 0, *rets[0].PeakMiB, 0, "absent from peak top yields 0")
+	assert.InDelta(t, 20, *rets[0].PreShutdownMiB, 1e-9, "pkg.d pre-shutdown")
+	assert.InDelta(t, 10, *rets[1].PeakMiB, 1e-9, "pkg.a peak")
+	assert.InDelta(t, 2, *rets[1].PreShutdownMiB, 1e-9, "pkg.a pre-shutdown")
+
+	combined := buildRetainers([]PprofTop{{Label: "peak+pre-shutdown", Rows: []PprofRow{row("pkg.a", 4)}}}, 10)
+	require.Len(t, combined, 1, "single combined profile")
+	assert.InDelta(t, 4, *combined[0].PeakMiB, 1e-9, "combined peak")
+	assert.InDelta(t, 4, *combined[0].PreShutdownMiB, 1e-9, "combined pre-shutdown")
+
+	peakOnly := buildRetainers([]PprofTop{{Label: "peak", Rows: []PprofRow{row("pkg.a", 4)}}}, 10)
+	require.Len(t, peakOnly, 1, "peak-only retainers")
+	assert.Nil(t, peakOnly[0].PreShutdownMiB, "no pre-shutdown profile yields nil")
+	assert.Empty(t, buildRetainers(nil, 10), "no profiles yields no retainers")
+}
+
+func TestBuildTimeSeries(t *testing.T) {
+	start := time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)
+	cpuFallback := 42.0
+	samples := []Sample{
+		{Time: start.Add(2 * time.Second), ElapsedSec: 2,
+			Stats: &StatsSnapshot{OutputEventsAcked: 1000, CPUTotalMS: 3000, MemoryAlloc: 8 << 20, FilesUnique: 10}},
+		{Time: start.Add(4 * time.Second), ElapsedSec: 4, MemStats: &MemStats{HeapAlloc: 16 << 20},
+			Stats: &StatsSnapshot{OutputEventsAcked: 1000, CPUTotalMS: 3100, MemoryAlloc: 99 << 20}},
+		{Time: start.Add(6 * time.Second), ElapsedSec: 6, CPUPercent: &cpuFallback},
+	}
+	ts := buildTimeSeries(samples, start)
+	require.Len(t, ts.rows, 3, "one row per sample")
+	assert.InDelta(t, 500, ts.rows[0][colAckRate], 1e-9, "first ACK rate uses the zero baseline at start")
+	assert.InDelta(t, 150, ts.rows[0][colCPU], 1e-9, "first CPU% uses the zero baseline at start")
+	assert.InDelta(t, 0, ts.rows[1][colAckRate], 1e-9, "no new ACKs")
+	assert.InDelta(t, 5, ts.rows[1][colCPU], 1e-9, "CPU% between samples")
+	assert.InDelta(t, 8, ts.rows[0][colHeapAlloc], 1e-9, "heap_alloc MiB from /stats")
+	assert.InDelta(t, 16, ts.rows[1][colHeapAlloc], 1e-9, "heap_alloc MiB prefers memstats")
+	assert.True(t, math.IsNaN(ts.rows[2][colAckRate]), "no stats yields NaN ACK rate")
+	assert.InDelta(t, cpuFallback, ts.rows[2][colCPU], 1e-9, "CPU% falls back to the runner value")
+	assert.True(t, ts.has[colFilesUnique], "files_unique has data")
+	assert.False(t, ts.has[colVMRSS], "no proc samples")
+	assert.InDelta(t, 500, ts.max[colAckRate], 1e-9, "ACK rate max")
+}
+
+func TestBackfillCPUPercent(t *testing.T) {
+	start := time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)
+	recorded := 7.0
+	samples := []Sample{
+		{Time: start.Add(time.Second), ElapsedSec: 1},
+		{Time: start.Add(2 * time.Second), ElapsedSec: 2, Stats: &StatsSnapshot{CPUTotalMS: 3000}},
+		{Time: start.Add(4 * time.Second), ElapsedSec: 4, Stats: &StatsSnapshot{CPUTotalMS: 3100}, CPUPercent: &recorded},
+		{Time: start.Add(6 * time.Second), ElapsedSec: 6, Stats: &StatsSnapshot{CPUTotalMS: 3300}},
+		{Time: start.Add(8 * time.Second), ElapsedSec: 8, Stats: &StatsSnapshot{CPUTotalMS: 100}},
+	}
+	backfillCPUPercent(samples, start)
+	assert.Nil(t, samples[0].CPUPercent, "samples without /stats are not backfilled")
+	require.NotNil(t, samples[1].CPUPercent, "first /stats sample backfilled")
+	assert.InDelta(t, 150, *samples[1].CPUPercent, 1e-9, "first sample uses the zero baseline at start")
+	assert.InDelta(t, recorded, *samples[2].CPUPercent, 0, "recorded values are kept")
+	require.NotNil(t, samples[3].CPUPercent, "missing value after a recorded one backfilled")
+	assert.InDelta(t, 10, *samples[3].CPUPercent, 1e-9, "baseline advances over recorded samples")
+	assert.Nil(t, samples[4].CPUPercent, "counter reset yields no value")
+
+	noStart := []Sample{{Time: start, Stats: &StatsSnapshot{CPUTotalMS: 10}}}
+	backfillCPUPercent(noStart, time.Time{})
+	assert.Nil(t, noStart[0].CPUPercent, "unknown start time yields no first value")
+
+	m := aggregateMetrics(samples, nil)
+	ts := buildTimeSeries(samples, start)
+	require.Contains(t, m, "cpu_percent", "cpu metric aggregated")
+	assert.InDelta(t, ts.max[colCPU], *m["cpu_percent"].Peak, 1e-9, "summary and chart CPU peaks agree")
+	for i, s := range samples {
+		if s.CPUPercent != nil {
+			assert.InDelta(t, *s.CPUPercent, ts.rows[i][colCPU], 1e-9, "chart CPU%% equals sample %d", i)
+		}
+	}
+}
+
+// chartFixture returns a summary and samples exercising every chart series.
+func chartFixture() (Summary, []Sample) {
+	start := time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)
+	var samples []Sample
+	for i := 1; i <= 20; i++ {
+		files := int64(min(i*50, 500))
+		samples = append(samples, Sample{
+			Time: start.Add(time.Duration(i) * time.Second), ElapsedSec: float64(i),
+			Stats: &StatsSnapshot{OutputEventsAcked: files * 100, CPUTotalMS: int64(i) * 800,
+				MemoryAlloc: int64(20+i) << 20, HarvesterClosed: files, FilesUnique: 500, Goroutines: 40},
+			Inputs:   &InputsSnapshot{HarvesterActiveReaders: 500 - files, HarvesterWaiting: 0},
+			Proc:     &ProcStatus{RssAnon: uint64(60+i) << 20, VmRSS: uint64(80+i) << 20},
+			Registry: &RegistryStats{Exists: true, LogJSONBytes: int64(i) << 18, ActiveCheckpointBytes: 1 << 20},
+		})
+	}
+	pp := func(v float64) *float64 { return &v }
+	tops := []PprofTop{
+		{Seq: 1, Label: "peak", ElapsedS: 8, TotalInuseBytes: 30 * mib, Rows: []PprofRow{
+			{Name: "github.com/x/readfile.poolForSize.func1", Short: "readfile.poolForSize.func1", FlatBytes: 12 * mib},
+			{Name: "github.com/x/streambuf.(*Buffer).doAppend", Short: "streambuf.(*Buffer).doAppend", FlatBytes: 6 * mib},
+		}},
+		{Seq: 2, Label: "pre-shutdown", ElapsedS: 19, TotalInuseBytes: 10 * mib, Rows: []PprofRow{
+			{Name: "github.com/x/readfile.poolForSize.func1", Short: "readfile.poolForSize.func1", FlatBytes: 2 * mib},
+			{Name: "main.it's", Short: "main.it's", FlatBytes: 1 * mib},
+		}},
+	}
+	s := Summary{
+		Run: RunResult{StartTime: start, IngestedTime: start.Add(10 * time.Second), SigtermTime: start.Add(19 * time.Second)},
+		ProfileHeap: []ProfilePoint{
+			{Seq: 1, Label: "peak", ElapsedS: 8, HasMemStats: true, HeapInuse: 40 << 20, PprofInuseBytes: pp(30 * mib)},
+			{Seq: 2, Label: "pre-shutdown", ElapsedS: 19, HasMemStats: true, HeapInuse: 15 << 20, PprofInuseBytes: pp(10 * mib)},
+		},
+		HeapTops:  tops,
+		Retainers: buildRetainers(tops, retainerTopN),
+	}
+	return s, samples
+}
+
+func TestGenerateCharts(t *testing.T) {
+	if _, err := exec.LookPath("gnuplot"); err != nil {
+		t.Skip("gnuplot not on PATH")
+	}
+	runDir := t.TempDir()
+	s, samples := chartFixture()
+	charts, err := generateCharts(t.Context(), runDir, &s, samples)
+	require.NoError(t, err, "generate charts")
+	require.Len(t, charts, 4, "all charts generated: %+v", charts)
+	for _, name := range []string{chartMemory, chartThroughput, chartCPU, chartRetainers} {
+		require.True(t, hasChart(charts, name), "chart %s generated", name)
+		path := filepath.Join(runDir, "charts", name+".svg")
+		info, err := os.Stat(path)
+		require.NoError(t, err, "stat %s", path)
+		assert.Greater(t, info.Size(), int64(1024), "%s is not trivially small", path)
+		assert.NoError(t, validateSVG(path), "%s is a complete SVG", path)
+		b, err := os.ReadFile(path)
+		require.NoError(t, err, "read %s", path)
+		var probe struct{}
+		assert.NoError(t, xml.Unmarshal(b, &probe), "%s is well-formed XML", path)
+	}
+
+	s.Charts = charts
+	md := renderMarkdown(s)
+	for _, alt := range []string{"Memory and Ingestion", "Throughput and Harvesters", "CPU and Registry I/O", "Top Heap Retainers"} {
+		assert.Regexp(t, `!\[`+regexp.QuoteMeta(alt)+`\]\(charts/[a-z-]+\.svg\)`, md,
+			"summary.md embeds %q", alt)
+	}
+}
+
+func TestGenerateChartsWithoutGnuplot(t *testing.T) {
+	t.Setenv("PATH", t.TempDir())
+	runDir := t.TempDir()
+	s, samples := chartFixture()
+	charts, err := generateCharts(t.Context(), runDir, &s, samples)
+	require.Error(t, err, "missing gnuplot must be reported")
+	assert.Contains(t, err.Error(), "gnuplot not found", "error names gnuplot")
+	assert.Empty(t, charts, "no charts without gnuplot")
+
+	s.Charts = charts
+	md := renderMarkdown(s)
+	assert.NotContains(t, md, "](charts/", "no image links without charts")
+	assert.Contains(t, md, "readfile.poolForSize.func1", "retainer bullets replace the missing chart")
 }
