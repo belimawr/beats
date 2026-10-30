@@ -1308,6 +1308,22 @@ func pollMetrics(ctx context.Context, tel *telemetry, out io.Writer, interval ti
 	}
 }
 
+// progressPercent estimates run completion for the progress log. Warm runs
+// with a kept registry may publish nothing (acked stays 0), so they fall
+// back to closed harvesters over expected files.
+func progressPercent(o RunOptions, st *StatsSnapshot) float64 {
+	if st == nil {
+		return 0
+	}
+	if (!o.KeepRegistry || st.OutputEventsAcked > 0) && o.ExpectedEvents > 0 {
+		return float64(st.OutputEventsAcked) * 100 / float64(o.ExpectedEvents)
+	}
+	if o.KeepRegistry && o.Files > 0 {
+		return float64(st.HarvesterClosed) * 100 / float64(o.Files)
+	}
+	return 0
+}
+
 // Run executes one benchmark run and returns its timeline. The returned
 // result is also written to ${RUN_DIR}/run.json.
 func Run(ctx context.Context, logger *log.Logger, o RunOptions) (res RunResult, err error) {
@@ -1469,8 +1485,9 @@ wait:
 			}
 			if time.Since(lastLog) >= 30*time.Second {
 				lastLog = time.Now()
-				logger.Printf("run: elapsed=%s acked=%d/%d done=%d active=%d harvesters running=%d started=%d closed=%d files_unique=%d",
-					time.Since(proc.start).Round(time.Second), s.Stats.OutputEventsAcked, o.ExpectedEvents, s.Stats.EventsDone,
+				logger.Printf("run: elapsed=%s progress=%.2f%% acked=%d/%d done=%d active=%d harvesters running=%d started=%d closed=%d files_unique=%d",
+					time.Since(proc.start).Round(time.Second), progressPercent(o, s.Stats),
+					s.Stats.OutputEventsAcked, o.ExpectedEvents, s.Stats.EventsDone,
 					s.Stats.EventsActive, s.Stats.HarvesterRunning, s.Stats.HarvesterStarted, s.Stats.HarvesterClosed, s.Stats.FilesUnique)
 			}
 			if det.Observe(s.Stats, s.Inputs) {

@@ -545,24 +545,28 @@ type ProfilePoint struct {
 type Summary struct {
 	RunDir string `json:"run_dir"`
 	// Filebeat comes from run.json, or from the Filebeat logs for older runs.
-	Filebeat      *FilebeatVersion      `json:"filebeat,omitempty"`
-	Run           RunResult             `json:"run"`
-	Manifest      *Manifest             `json:"manifest,omitempty"`
-	Stages        Stages                `json:"stages"`
-	Markers       LogMarkers            `json:"log_markers"`
-	Metrics       map[string]MetricStat `json:"metrics"`
-	FinalStats    *StatsSnapshot        `json:"final_stats,omitempty"`
-	FinalInputs   *InputsSnapshot       `json:"final_inputs,omitempty"`
-	EventsPerSec  *float64              `json:"events_per_sec,omitempty"`
-	BytesPerSec   *float64              `json:"bytes_per_sec,omitempty"`
-	Samples       int                   `json:"samples"`
-	Profiles      int                   `json:"profiles"`
-	ProfileErrors int                   `json:"profile_errors"`
-	ProfileHeap   []ProfilePoint        `json:"profile_heap,omitempty"`
-	HeapTops      []PprofTop            `json:"heap_tops,omitempty"`
-	Retainers     []Retainer            `json:"retainers,omitempty"`
-	Charts        []ChartFile           `json:"charts,omitempty"`
-	ChartsError   string                `json:"charts_error,omitempty"`
+	Filebeat *FilebeatVersion `json:"filebeat,omitempty"`
+	// UTC copies of Run.StartTime / Run.ExitTime plus report creation time.
+	TestStarted     time.Time             `json:"test_started,omitzero"`
+	TestEnded       time.Time             `json:"test_ended,omitzero"`
+	ReportGenerated time.Time             `json:"report_generated"`
+	Run             RunResult             `json:"run"`
+	Manifest        *Manifest             `json:"manifest,omitempty"`
+	Stages          Stages                `json:"stages"`
+	Markers         LogMarkers            `json:"log_markers"`
+	Metrics         map[string]MetricStat `json:"metrics"`
+	FinalStats      *StatsSnapshot        `json:"final_stats,omitempty"`
+	FinalInputs     *InputsSnapshot       `json:"final_inputs,omitempty"`
+	EventsPerSec    *float64              `json:"events_per_sec,omitempty"`
+	BytesPerSec     *float64              `json:"bytes_per_sec,omitempty"`
+	Samples         int                   `json:"samples"`
+	Profiles        int                   `json:"profiles"`
+	ProfileErrors   int                   `json:"profile_errors"`
+	ProfileHeap     []ProfilePoint        `json:"profile_heap,omitempty"`
+	HeapTops        []PprofTop            `json:"heap_tops,omitempty"`
+	Retainers       []Retainer            `json:"retainers,omitempty"`
+	Charts          []ChartFile           `json:"charts,omitempty"`
+	ChartsError     string                `json:"charts_error,omitempty"`
 }
 
 // readNDJSON decodes every line of path into T. Missing files yield nil.
@@ -722,6 +726,13 @@ func BuildReport(ctx context.Context, logger *log.Logger, runDir, goBin string, 
 		return s, fmt.Errorf("decode run.json: %w", err)
 	}
 	s.Manifest = manifest
+	s.ReportGenerated = time.Now().UTC()
+	if !s.Run.StartTime.IsZero() {
+		s.TestStarted = s.Run.StartTime.UTC()
+	}
+	if !s.Run.ExitTime.IsZero() {
+		s.TestEnded = s.Run.ExitTime.UTC()
+	}
 
 	if s.Markers, err = parseLogs(filepath.Join(runDir, "logs")); err != nil {
 		logger.Printf("report: parse logs: %v", err)
@@ -785,6 +796,13 @@ func BuildReport(ctx context.Context, logger *log.Logger, runDir, goBin string, 
 	return s, nil
 }
 
+func fmtUTC(t time.Time) string {
+	if t.IsZero() {
+		return "n/a"
+	}
+	return t.UTC().Format(time.RFC3339)
+}
+
 func fmtSec(v *float64) string {
 	if v == nil {
 		return "n/a"
@@ -818,6 +836,8 @@ func renderMarkdown(s Summary) string {
 	} else {
 		b.WriteString("- filebeat: unknown version\n")
 	}
+	fmt.Fprintf(&b, "- test_started: %s, test_ended: %s, report_generated: %s\n",
+		fmtUTC(r.StartTime), fmtUTC(r.ExitTime), fmtUTC(s.ReportGenerated))
 	fmt.Fprintf(&b, "- run_dir: `%s`\n", s.RunDir)
 	fmt.Fprintf(&b, "- mode: %s, backend: %s, pid: %d\n", r.Mode, r.Backend, r.PID)
 	fmt.Fprintf(&b, "- files: %d, expected_events: %d\n", r.Files, r.ExpectedEvents)

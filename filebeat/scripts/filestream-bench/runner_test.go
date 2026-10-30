@@ -610,6 +610,29 @@ func TestReadFilebeatVersion(t *testing.T) {
 	assert.Empty(t, missing.Version, "no version for a missing binary")
 }
 
+func TestProgressPercent(t *testing.T) {
+	fresh := RunOptions{ExpectedEvents: 25_500_000, Files: 500_000}
+	warm := RunOptions{ExpectedEvents: 25_500_000, Files: 500_000, KeepRegistry: true}
+	tests := []struct {
+		name string
+		o    RunOptions
+		st   *StatsSnapshot
+		want float64
+	}{
+		{name: "fresh from acked", o: fresh, st: &StatsSnapshot{OutputEventsAcked: 1_922_889, HarvesterClosed: 37_942}, want: 7.540741},
+		{name: "fresh at start", o: fresh, st: &StatsSnapshot{HarvesterClosed: 10}, want: 0},
+		{name: "fresh complete", o: fresh, st: &StatsSnapshot{OutputEventsAcked: 25_500_000}, want: 100},
+		{name: "warm without acks uses closed/files", o: warm, st: &StatsSnapshot{HarvesterClosed: 125_000}, want: 25},
+		{name: "warm with acks uses acked", o: warm, st: &StatsSnapshot{OutputEventsAcked: 2_550_000, HarvesterClosed: 400_000}, want: 10},
+		{name: "fresh without expected events", o: RunOptions{Files: 10}, st: &StatsSnapshot{OutputEventsAcked: 5, HarvesterClosed: 5}, want: 0},
+		{name: "warm without files", o: RunOptions{KeepRegistry: true}, st: &StatsSnapshot{HarvesterClosed: 5}, want: 0},
+		{name: "nil stats", o: fresh, want: 0},
+	}
+	for _, tc := range tests {
+		assert.InDelta(t, tc.want, progressPercent(tc.o, tc.st), 1e-6, "progressPercent: %s", tc.name)
+	}
+}
+
 func TestCheckPortFree(t *testing.T) {
 	var lc net.ListenConfig
 	l, err := lc.Listen(t.Context(), "tcp", "127.0.0.1:0")

@@ -256,6 +256,21 @@ func TestRunEndToEndWithFakeFilebeat(t *testing.T) {
 	assert.NotNil(t, s.Stages.FirstEventsS, "first events stage")
 	md, err := os.ReadFile(filepath.Join(opts.RunDir, "summary.md"))
 	require.NoError(t, err, "read summary.md")
+	assert.Equal(t, time.UTC, s.ReportGenerated.Location(), "report_generated in UTC")
+	assert.WithinDuration(t, time.Now(), s.ReportGenerated, time.Minute, "report_generated is the build time")
+	assert.True(t, s.TestStarted.Equal(res.StartTime), "test_started equals run start")
+	assert.True(t, s.TestEnded.Equal(res.ExitTime), "test_ended equals run exit")
+	assert.Contains(t, string(md), "- test_started: "+res.StartTime.UTC().Format(time.RFC3339)+
+		", test_ended: "+res.ExitTime.UTC().Format(time.RFC3339)+", report_generated: ", "summary.md timestamps")
+	var raw map[string]any
+	sj, err := os.ReadFile(filepath.Join(opts.RunDir, "summary.json"))
+	require.NoError(t, err, "read summary.json")
+	require.NoError(t, json.Unmarshal(sj, &raw), "decode summary.json")
+	for _, k := range []string{"test_started", "test_ended", "report_generated"} {
+		v, ok := raw[k].(string)
+		require.True(t, ok, "summary.json has %s", k)
+		assert.True(t, strings.HasSuffix(v, "Z"), "summary.json %s is UTC: %s", k, v)
+	}
 	require.NotNil(t, s.Filebeat, "filebeat version in summary.json")
 	assert.Equal(t, versionSourceCmd, s.Filebeat.Source, "run.json version wins over logs")
 	assert.Contains(t, string(md), "- version output: `"+fakeVersionLine+"`", "summary.md shows the raw version line")
@@ -452,6 +467,27 @@ func TestRenderMarkdownFilebeatVersion(t *testing.T) {
 	assert.NotContains(t, md, "- version output:", "no raw line for log-derived version")
 
 	assert.Contains(t, renderMarkdown(Summary{}), "- filebeat: unknown version\n", "missing version info")
+}
+
+func TestRenderMarkdownTimestamps(t *testing.T) {
+	edt := time.FixedZone("EDT", -4*3600)
+	s := Summary{
+		Run: RunResult{
+			StartTime: time.Date(2026, 10, 30, 15, 47, 40, 123e6, edt),
+			ExitTime:  time.Date(2026, 10, 30, 15, 58, 2, 0, edt),
+		},
+		ReportGenerated: time.Date(2026, 10, 30, 21, 22, 0, 0, time.UTC),
+	}
+	assert.Contains(t, renderMarkdown(s),
+		"- test_started: 2026-10-30T19:47:40Z, test_ended: 2026-10-30T19:58:02Z, report_generated: 2026-10-30T21:22:00Z\n",
+		"UTC RFC3339 timestamps at the top of summary.md")
+
+	incomplete := Summary{Run: RunResult{StartTime: s.Run.StartTime}, ReportGenerated: s.ReportGenerated}
+	assert.Contains(t, renderMarkdown(incomplete),
+		"- test_started: 2026-10-30T19:47:40Z, test_ended: n/a, report_generated: 2026-10-30T21:22:00Z\n",
+		"missing exit time rendered as n/a")
+	assert.Contains(t, renderMarkdown(Summary{}), "- test_started: n/a, test_ended: n/a, report_generated: n/a\n",
+		"all timestamps missing")
 }
 
 func TestAggregateMetrics(t *testing.T) {
