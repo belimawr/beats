@@ -68,12 +68,61 @@ type LogMarkers struct {
 	InputsStarted     time.Time `json:"inputs_started,omitzero"`
 	Stopping          time.Time `json:"stopping,omitzero"`
 	BeatStopped       time.Time `json:"beat_stopped,omitzero"`
+
+	// Build is assembled from the "Build info" and "Go runtime info" lines;
+	// it backs Summary.Filebeat for runs whose run.json predates it.
+	Build *FilebeatVersion `json:"-"`
 }
 
+const (
+	msgBuildInfo     = "Build info"
+	msgGoRuntimeInfo = "Go runtime info"
+)
+
 type logLine struct {
-	Level     string `json:"log.level"`
-	Timestamp string `json:"@timestamp"`
-	Message   string `json:"message"`
+	Level      string `json:"log.level"`
+	Timestamp  string `json:"@timestamp"`
+	Message    string `json:"message"`
+	SystemInfo *struct {
+		Build *struct {
+			Commit  string `json:"commit"`
+			Libbeat string `json:"libbeat"`
+			Time    string `json:"time"`
+			Version string `json:"version"`
+		} `json:"build"`
+		Go *struct {
+			Arch    string `json:"arch"`
+			Version string `json:"version"`
+		} `json:"go"`
+	} `json:"system_info"`
+}
+
+// applyBuildLog merges a "Build info" / "Go runtime info" line into m.Build.
+func (m *LogMarkers) applyBuildLog(l logLine) {
+	if l.SystemInfo == nil {
+		return
+	}
+	v := m.Build
+	if v == nil {
+		v = &FilebeatVersion{Source: versionSourceLogs}
+	}
+	switch {
+	case l.Message == msgBuildInfo && l.SystemInfo.Build != nil:
+		b := l.SystemInfo.Build
+		v.Version, v.Libbeat = b.Version, b.Libbeat
+		if v.Commit = knownField(b.Commit); v.Commit != "" {
+			v.CommitSource = commitSourceLdflags
+		}
+		// Builds without ldflags log the zero time.
+		if t, err := time.Parse(time.RFC3339Nano, b.Time); err == nil && !t.IsZero() {
+			v.BuildTime = t.UTC().String()
+		}
+	case l.Message == msgGoRuntimeInfo && l.SystemInfo.Go != nil:
+		v.Arch, v.GoVersion = l.SystemInfo.Go.Arch, l.SystemInfo.Go.Version
+	default:
+		return
+	}
+	m.Build = v
 }
 
 var logTimeLayouts = []string{
@@ -147,6 +196,7 @@ func scanLogs(r io.Reader, m *LogMarkers) error {
 		case "warn":
 			m.Warnings++
 		}
+		m.applyBuildLog(l)
 		for _, mk := range markers {
 			if !mk.match(l.Message) {
 				continue
@@ -493,7 +543,9 @@ type ProfilePoint struct {
 
 // Summary is written to summary.json and rendered into summary.md.
 type Summary struct {
-	RunDir        string                `json:"run_dir"`
+	RunDir string `json:"run_dir"`
+	// Filebeat comes from run.json, or from the Filebeat logs for older runs.
+	Filebeat      *FilebeatVersion      `json:"filebeat,omitempty"`
 	Run           RunResult             `json:"run"`
 	Manifest      *Manifest             `json:"manifest,omitempty"`
 	Stages        Stages                `json:"stages"`
@@ -674,6 +726,10 @@ func BuildReport(ctx context.Context, logger *log.Logger, runDir, goBin string, 
 	if s.Markers, err = parseLogs(filepath.Join(runDir, "logs")); err != nil {
 		logger.Printf("report: parse logs: %v", err)
 	}
+	s.Filebeat = s.Run.Filebeat
+	if s.Filebeat == nil {
+		s.Filebeat = s.Markers.Build
+	}
 	samples, err := readNDJSON[Sample](filepath.Join(runDir, "metrics.ndjson"))
 	if err != nil {
 		logger.Printf("report: %v", err)
@@ -751,6 +807,17 @@ func renderMarkdown(s Summary) string {
 	var b strings.Builder
 	r := s.Run
 	fmt.Fprintf(&b, "# Filestream benchmark summary\n\n")
+	if v := s.Filebeat; v != nil {
+		fmt.Fprintf(&b, "- filebeat: %s (source: %s)\n", v.Summary(), v.Source)
+		if v.VCSRevision != "" && v.VCSRevision != v.Commit {
+			fmt.Fprintf(&b, "- vcs.revision: `%s`\n", v.VCSRevision)
+		}
+		if v.Raw != "" {
+			fmt.Fprintf(&b, "- version output: `%s`\n", v.Raw)
+		}
+	} else {
+		b.WriteString("- filebeat: unknown version\n")
+	}
 	fmt.Fprintf(&b, "- run_dir: `%s`\n", s.RunDir)
 	fmt.Fprintf(&b, "- mode: %s, backend: %s, pid: %d\n", r.Mode, r.Backend, r.PID)
 	fmt.Fprintf(&b, "- files: %d, expected_events: %d\n", r.Files, r.ExpectedEvents)

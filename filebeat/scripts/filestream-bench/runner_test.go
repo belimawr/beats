@@ -25,6 +25,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -513,6 +514,100 @@ func TestTelemetryCollect(t *testing.T) {
 	assert.False(t, s.HTTPOK, "closed server must not be reachable")
 	assert.Nil(t, s.Stats, "no stats from closed server")
 	assert.NotEmpty(t, s.Errors, "errors recorded for closed server")
+}
+
+func TestParseFilebeatVersion(t *testing.T) {
+	tests := []struct {
+		name string
+		out  string
+		want FilebeatVersion
+		err  bool
+	}{
+		{
+			name: "release build",
+			out:  "filebeat version 9.6.0 (amd64), libbeat 9.6.0 [0f2b1c3d4e5f built 2026-10-01 10:20:30 +0000 UTC] (FIPS-distribution: true)\n",
+			want: FilebeatVersion{
+				Source: versionSourceCmd, Beat: "filebeat", Version: "9.6.0", Arch: "amd64", Libbeat: "9.6.0",
+				Commit: "0f2b1c3d4e5f", CommitSource: commitSourceLdflags, BuildTime: "2026-10-01 10:20:30 +0000 UTC",
+				FIPS: new(true),
+				Raw:  "filebeat version 9.6.0 (amd64), libbeat 9.6.0 [0f2b1c3d4e5f built 2026-10-01 10:20:30 +0000 UTC] (FIPS-distribution: true)",
+			},
+		},
+		{
+			name: "dev build with noise",
+			out:  "some warning\nfilebeat version 9.7.0 (arm64), libbeat 9.7.0 [unknown built unknown] (FIPS-distribution: false)\n",
+			want: FilebeatVersion{
+				Source: versionSourceCmd, Beat: "filebeat", Version: "9.7.0", Arch: "arm64", Libbeat: "9.7.0",
+				FIPS: new(false),
+				Raw:  "filebeat version 9.7.0 (arm64), libbeat 9.7.0 [unknown built unknown] (FIPS-distribution: false)",
+			},
+		},
+		{
+			name: "older format without FIPS",
+			out:  "filebeat version 8.19.0 (amd64), libbeat 8.19.0 [abc built 2025-01-01 00:00:00 +0000 UTC]",
+			want: FilebeatVersion{
+				Source: versionSourceCmd, Beat: "filebeat", Version: "8.19.0", Arch: "amd64", Libbeat: "8.19.0",
+				Commit: "abc", CommitSource: commitSourceLdflags, BuildTime: "2025-01-01 00:00:00 +0000 UTC",
+				Raw: "filebeat version 8.19.0 (amd64), libbeat 8.19.0 [abc built 2025-01-01 00:00:00 +0000 UTC]",
+			},
+		},
+		{name: "no version line", out: "Error: unknown command\n", err: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := parseFilebeatVersion(tc.out)
+			if tc.err {
+				assert.Error(t, err, "parse must fail for %q", tc.out)
+				return
+			}
+			require.NoError(t, err, "parse %q", tc.out)
+			assert.Equal(t, tc.want, got, "parsed version")
+		})
+	}
+}
+
+func TestApplyBuildInfo(t *testing.T) {
+	bi := &debug.BuildInfo{GoVersion: "go1.26.10", Settings: []debug.BuildSetting{
+		{Key: "vcs.revision", Value: "feedface"},
+		{Key: "vcs.time", Value: "2026-10-30T12:00:00Z"},
+		{Key: "vcs.modified", Value: "true"},
+	}}
+
+	dev := FilebeatVersion{Source: versionSourceCmd, Version: "9.7.0"}
+	applyBuildInfo(&dev, bi)
+	assert.Equal(t, "go1.26.10", dev.GoVersion, "go version")
+	assert.Equal(t, "feedface", dev.Commit, "vcs.revision used when ldflags commit is unknown")
+	assert.Equal(t, commitSourceVCS, dev.CommitSource, "commit source")
+	assert.Equal(t, "2026-10-30T12:00:00Z", dev.VCSTime, "vcs.time")
+	require.NotNil(t, dev.VCSModified, "vcs.modified")
+	assert.True(t, *dev.VCSModified, "vcs.modified value")
+	assert.Equal(t, "filebeat 9.7.0, commit feedface (buildinfo vcs.revision, modified), built unknown, go1.26.10",
+		dev.Summary(), "summary line")
+
+	release := FilebeatVersion{Commit: "0f2b", CommitSource: commitSourceLdflags}
+	applyBuildInfo(&release, bi)
+	assert.Equal(t, "0f2b", release.Commit, "ldflags commit wins over vcs.revision")
+	assert.Equal(t, "feedface", release.VCSRevision, "vcs.revision still recorded")
+
+	bare := FilebeatVersion{}
+	applyBuildInfo(&bare, &debug.BuildInfo{GoVersion: "go1.26.10"})
+	assert.Empty(t, bare.Commit, "no commit without ldflags or VCS stamp")
+	assert.Nil(t, bare.VCSModified, "no vcs.modified without VCS stamp")
+}
+
+func TestReadFilebeatVersion(t *testing.T) {
+	self, err := os.Executable()
+	require.NoError(t, err, "test executable path")
+	t.Setenv(fakeFilebeatEnv, "1")
+	v := readFilebeatVersion(t.Context(), self)
+	assert.Empty(t, v.Errors, "no errors reading the fake binary's version")
+	assert.Equal(t, fakeVersionLine, v.Raw, "raw version line")
+	assert.Equal(t, "0123abcd", v.Commit, "ldflags commit")
+	assert.NotEmpty(t, v.GoVersion, "go version from the binary's build info")
+
+	missing := readFilebeatVersion(t.Context(), filepath.Join(t.TempDir(), "nope"))
+	assert.Len(t, missing.Errors, 2, "version command and buildinfo errors recorded: %v", missing.Errors)
+	assert.Empty(t, missing.Version, "no version for a missing binary")
 }
 
 func TestCheckPortFree(t *testing.T) {

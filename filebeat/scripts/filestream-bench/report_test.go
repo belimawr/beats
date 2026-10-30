@@ -42,7 +42,10 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-const fakeFilebeatEnv = "FSBENCH_FAKE_FILEBEAT"
+const (
+	fakeFilebeatEnv = "FSBENCH_FAKE_FILEBEAT"
+	fakeVersionLine = "filebeat version 9.7.0 (amd64), libbeat 9.7.0 [0123abcd built 2026-10-30 12:00:00 +0000 UTC] (FIPS-distribution: false)"
+)
 
 func TestMain(m *testing.M) {
 	if os.Getenv(fakeFilebeatEnv) == "1" {
@@ -61,6 +64,10 @@ func fakeFilebeat() int {
 
 	var cfgPath, logsDir string
 	args := os.Args[1:]
+	if len(args) > 0 && args[0] == "version" {
+		fmt.Fprintln(os.Stdout, fakeVersionLine)
+		return 0
+	}
 	for i, a := range args {
 		switch {
 		case a == "-c" && i+1 < len(args):
@@ -206,6 +213,11 @@ func TestRunEndToEndWithFakeFilebeat(t *testing.T) {
 	assert.False(t, res.Killed, "fake filebeat must exit on SIGTERM")
 	assert.Equal(t, 0, res.ExitCode, "exit code")
 	assert.Equal(t, modeFresh, res.Mode, "mode")
+	require.NotNil(t, res.Filebeat, "filebeat version recorded in run.json")
+	assert.Equal(t, "9.7.0", res.Filebeat.Version, "version from `filebeat version`")
+	assert.Equal(t, "0123abcd", res.Filebeat.Commit, "ldflags commit")
+	assert.Equal(t, commitSourceLdflags, res.Filebeat.CommitSource, "commit source")
+	assert.NotEmpty(t, res.Filebeat.GoVersion, "go version from buildinfo")
 	assert.False(t, res.ReadyTime.IsZero(), "ready time recorded")
 	assert.False(t, res.IngestedTime.IsZero(), "ingested time recorded")
 	assert.False(t, res.SigtermTime.IsZero(), "sigterm time recorded")
@@ -244,6 +256,9 @@ func TestRunEndToEndWithFakeFilebeat(t *testing.T) {
 	assert.NotNil(t, s.Stages.FirstEventsS, "first events stage")
 	md, err := os.ReadFile(filepath.Join(opts.RunDir, "summary.md"))
 	require.NoError(t, err, "read summary.md")
+	require.NotNil(t, s.Filebeat, "filebeat version in summary.json")
+	assert.Equal(t, versionSourceCmd, s.Filebeat.Source, "run.json version wins over logs")
+	assert.Contains(t, string(md), "- version output: `"+fakeVersionLine+"`", "summary.md shows the raw version line")
 	assert.Contains(t, string(md), "| first scan (process start -> files_unique > 0) |", "summary.md renders first scan")
 	assert.Contains(t, string(md), "| first events (process start -> events added or harvester started) |", "summary.md renders first events")
 	assert.NotNil(t, s.Stages.RegistryInitS, "registry init stage")
@@ -327,6 +342,8 @@ func TestRunInterrupted(t *testing.T) {
 	res, err = Run(ctx, testLogger(), opts)
 	require.NoError(t, err, "interrupted run is not an error")
 	assert.True(t, res.Interrupted, "interrupt recorded")
+	require.NotNil(t, res.Filebeat, "version recorded for interrupted runs")
+	assert.Equal(t, "9.7.0", res.Filebeat.Version, "version survives the interrupt")
 	assert.False(t, res.ExitTime.IsZero(), "process exited after interrupt")
 	assert.NotErrorIs(t, err, context.Canceled, "no context error surfaced")
 }
@@ -388,6 +405,53 @@ func TestScanLogs(t *testing.T) {
 	require.NotNil(t, st.ShutdownLogS, "shutdown from logs")
 	assert.InDelta(t, 5, *st.ShutdownLogS, 1e-9, "shutdown log seconds")
 	assert.Nil(t, st.HTTPReadyS, "missing ready time yields nil")
+}
+
+func TestScanLogsBuildInfo(t *testing.T) {
+	logs := strings.Join([]string{
+		`{"log.level":"info","@timestamp":"2026-10-30T15:47:40.584-0400","message":"Beat info","system_info":{"beat":{"type":"filebeat"}}}`,
+		`{"log.level":"info","@timestamp":"2026-10-30T15:47:40.584-0400","message":"Build info","system_info":{"build":{"commit":"unknown","libbeat":"9.7.0","time":"0001-01-01T00:00:00.000Z","version":"9.7.0"}}}`,
+		`{"log.level":"info","@timestamp":"2026-10-30T15:47:40.584-0400","message":"Go runtime info","system_info":{"go":{"os":"linux","arch":"amd64","max_procs":16,"version":"go1.26.10"}}}`,
+	}, "\n")
+	var m LogMarkers
+	require.NoError(t, scanLogs(strings.NewReader(logs), &m), "scan logs")
+	require.NotNil(t, m.Build, "build info extracted")
+	assert.Equal(t, FilebeatVersion{Source: versionSourceLogs, Version: "9.7.0", Libbeat: "9.7.0", Arch: "amd64",
+		GoVersion: "go1.26.10"}, *m.Build, "dev build: unknown commit and zero build time dropped")
+
+	release := `{"log.level":"info","@timestamp":"2026-10-30T15:47:40.584-0400","message":"Build info","system_info":{"build":{"commit":"0f2b","libbeat":"9.6.0","time":"2026-10-01T10:20:30.000Z","version":"9.6.0"}}}`
+	var rm LogMarkers
+	require.NoError(t, scanLogs(strings.NewReader(release), &rm), "scan release logs")
+	require.NotNil(t, rm.Build, "release build info extracted")
+	assert.Equal(t, "0f2b", rm.Build.Commit, "release commit")
+	assert.Equal(t, commitSourceLdflags, rm.Build.CommitSource, "release commit source")
+	assert.Equal(t, "2026-10-01 10:20:30 +0000 UTC", rm.Build.BuildTime, "release build time")
+
+	var none LogMarkers
+	require.NoError(t, scanLogs(strings.NewReader(`{"message":"filebeat start running."}`), &none), "scan logs")
+	assert.Nil(t, none.Build, "no build info lines yields nil")
+}
+
+func TestRenderMarkdownFilebeatVersion(t *testing.T) {
+	v, err := parseFilebeatVersion(fakeVersionLine)
+	require.NoError(t, err, "parse fake version line")
+	v.GoVersion = "go1.26.10"
+	v.VCSRevision = "feedface"
+	md := renderMarkdown(Summary{Filebeat: &v})
+	head := md[:strings.Index(md, "- run_dir:")]
+	assert.Contains(t, head,
+		"- filebeat: filebeat 9.7.0 (amd64), libbeat 9.7.0, commit 0123abcd (ldflags), built 2026-10-30 12:00:00 +0000 UTC, go1.26.10, FIPS false (source: version command)\n",
+		"version summary at the top of summary.md")
+	assert.Contains(t, head, "- vcs.revision: `feedface`\n", "differing vcs.revision shown")
+	assert.Contains(t, head, "- version output: `"+fakeVersionLine+"`\n", "raw version line shown")
+
+	fromLogs := FilebeatVersion{Source: versionSourceLogs, Version: "9.7.0", Libbeat: "9.7.0", Arch: "amd64", GoVersion: "go1.26.10"}
+	md = renderMarkdown(Summary{Filebeat: &fromLogs})
+	assert.Contains(t, md, "- filebeat: filebeat 9.7.0 (amd64), libbeat 9.7.0, commit unknown, built unknown, go1.26.10 (source: logs)\n",
+		"log-derived version")
+	assert.NotContains(t, md, "- version output:", "no raw line for log-derived version")
+
+	assert.Contains(t, renderMarkdown(Summary{}), "- filebeat: unknown version\n", "missing version info")
 }
 
 func TestAggregateMetrics(t *testing.T) {

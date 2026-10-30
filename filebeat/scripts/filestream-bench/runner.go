@@ -21,6 +21,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"debug/buildinfo"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -33,6 +34,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync"
@@ -124,6 +126,169 @@ type RunResult struct {
 	ExitCode    int    `json:"exit_code"`
 	ExitError   string `json:"exit_error,omitempty"`
 	Error       string `json:"error,omitempty"`
+
+	Filebeat *FilebeatVersion `json:"filebeat,omitempty"`
+}
+
+// Sources of FilebeatVersion data.
+const (
+	versionSourceCmd       = "version command"
+	versionSourceLogs      = "logs"
+	commitSourceLdflags    = "ldflags"
+	commitSourceVCS        = "buildinfo vcs.revision"
+	unknownVersionField    = "unknown"
+	filebeatVersionTimeout = 30 * time.Second
+)
+
+// FilebeatVersion identifies the Filebeat binary under test. Empty strings
+// mean unknown; "unknown" placeholders printed by Filebeat are dropped.
+type FilebeatVersion struct {
+	Source    string `json:"source"`
+	Raw       string `json:"raw,omitempty"`
+	Beat      string `json:"beat,omitempty"`
+	Version   string `json:"version,omitempty"`
+	Arch      string `json:"arch,omitempty"`
+	Libbeat   string `json:"libbeat,omitempty"`
+	BuildTime string `json:"build_time,omitempty"`
+	FIPS      *bool  `json:"fips,omitempty"`
+	// Commit is the ldflags commit or, for dev builds without it, the
+	// buildinfo vcs.revision; CommitSource tells which.
+	Commit       string   `json:"commit,omitempty"`
+	CommitSource string   `json:"commit_source,omitempty"`
+	GoVersion    string   `json:"go_version,omitempty"`
+	VCSRevision  string   `json:"vcs_revision,omitempty"`
+	VCSTime      string   `json:"vcs_time,omitempty"`
+	VCSModified  *bool    `json:"vcs_modified,omitempty"`
+	Errors       []string `json:"errors,omitempty"`
+}
+
+// filebeatVersionRe matches the line printed by libbeat/cmd/version.go:
+// "%s version %s (%s), libbeat %s [%s built %s] (FIPS-distribution: %v)".
+// The build time is time.Time.String() and contains spaces.
+var filebeatVersionRe = regexp.MustCompile(
+	`^(\S+) version (\S+) \(([^)]*)\), libbeat (\S+) \[(\S+) built ([^\]]*)\](?: \(FIPS-distribution: (true|false)\))?`)
+
+func knownField(s string) string {
+	if s == unknownVersionField {
+		return ""
+	}
+	return s
+}
+
+// parseFilebeatVersion extracts the version line from `filebeat version`
+// output.
+func parseFilebeatVersion(out string) (FilebeatVersion, error) {
+	for line := range strings.Lines(out) {
+		line = strings.TrimSpace(line)
+		m := filebeatVersionRe.FindStringSubmatch(line)
+		if m == nil {
+			continue
+		}
+		v := FilebeatVersion{
+			Source:    versionSourceCmd,
+			Raw:       line,
+			Beat:      m[1],
+			Version:   m[2],
+			Arch:      m[3],
+			Libbeat:   m[4],
+			Commit:    knownField(m[5]),
+			BuildTime: knownField(m[6]),
+		}
+		if v.Commit != "" {
+			v.CommitSource = commitSourceLdflags
+		}
+		if m[7] != "" {
+			v.FIPS = new(m[7] == "true")
+		}
+		return v, nil
+	}
+	return FilebeatVersion{}, fmt.Errorf("no version line in output %q", strings.TrimSpace(out))
+}
+
+// applyBuildInfo adds the Go version and VCS stamp, and falls back to
+// vcs.revision as commit for builds without the ldflags commit.
+func applyBuildInfo(v *FilebeatVersion, bi *debug.BuildInfo) {
+	v.GoVersion = bi.GoVersion
+	for _, s := range bi.Settings {
+		switch s.Key {
+		case "vcs.revision":
+			v.VCSRevision = s.Value
+		case "vcs.time":
+			v.VCSTime = s.Value
+		case "vcs.modified":
+			v.VCSModified = new(s.Value == "true")
+		}
+	}
+	if v.Commit == "" && v.VCSRevision != "" {
+		v.Commit, v.CommitSource = v.VCSRevision, commitSourceVCS
+	}
+}
+
+// readFilebeatVersion runs `<bin> version` and reads the binary's Go build
+// info. Failures are recorded in Errors and never fail the run.
+func readFilebeatVersion(ctx context.Context, bin string) FilebeatVersion {
+	ctx, cancel := context.WithTimeout(ctx, filebeatVersionTimeout)
+	defer cancel()
+	var stderr bytes.Buffer
+	cmd := exec.CommandContext(ctx, bin, "version", "--strict.perms=false")
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+
+	v := FilebeatVersion{Source: versionSourceCmd}
+	if err != nil {
+		v.Errors = append(v.Errors, fmt.Sprintf("%s version: %v: %s", bin, err, strings.TrimSpace(stderr.String())))
+	} else if parsed, perr := parseFilebeatVersion(string(out)); perr != nil {
+		v.Errors = append(v.Errors, perr.Error())
+	} else {
+		v = parsed
+	}
+	if bi, err := buildinfo.ReadFile(bin); err != nil {
+		v.Errors = append(v.Errors, "buildinfo: "+err.Error())
+	} else {
+		applyBuildInfo(&v, bi)
+	}
+	return v
+}
+
+// Summary renders v on one line, e.g. "filebeat 9.7.0 (amd64), libbeat
+// 9.7.0, commit abc (ldflags), built 2026-10-30 ..., go1.26.10, FIPS false".
+func (v FilebeatVersion) Summary() string {
+	orUnknown := func(s string) string {
+		if s == "" {
+			return unknownVersionField
+		}
+		return s
+	}
+	beat := v.Beat
+	if beat == "" {
+		beat = "filebeat"
+	}
+	parts := []string{beat + " " + orUnknown(v.Version)}
+	if v.Arch != "" {
+		parts[0] += " (" + v.Arch + ")"
+	}
+	if v.Libbeat != "" {
+		parts = append(parts, "libbeat "+v.Libbeat)
+	}
+	commit := "commit " + orUnknown(v.Commit)
+	var notes []string
+	if v.CommitSource != "" {
+		notes = append(notes, v.CommitSource)
+	}
+	if v.VCSModified != nil && *v.VCSModified {
+		notes = append(notes, "modified")
+	}
+	if len(notes) > 0 {
+		commit += " (" + strings.Join(notes, ", ") + ")"
+	}
+	parts = append(parts, commit, "built "+orUnknown(v.BuildTime))
+	if v.GoVersion != "" {
+		parts = append(parts, v.GoVersion)
+	}
+	if v.FIPS != nil {
+		parts = append(parts, fmt.Sprintf("FIPS %t", *v.FIPS))
+	}
+	return strings.Join(parts, ", ")
 }
 
 // ---------------------------------------------------------------------------
@@ -1169,6 +1334,21 @@ func Run(ctx context.Context, logger *log.Logger, o RunOptions) (res RunResult, 
 	if err := checkPortFree(ctx, o.HTTPPort); err != nil {
 		return res, err
 	}
+	// Concurrent and detached from ctx: it must neither delay Filebeat's start
+	// nor be lost when the run is interrupted. Joined before run.json is written.
+	versionDone := make(chan FilebeatVersion, 1)
+	go func() {
+		fv := readFilebeatVersion(context.WithoutCancel(ctx), o.FilebeatBin)
+		logger.Printf("filebeat: %s", fv.Summary())
+		for _, e := range fv.Errors {
+			logger.Printf("filebeat: warning: version info: %s", e)
+		}
+		versionDone <- fv
+	}()
+	defer func() {
+		fv := <-versionDone
+		res.Filebeat = &fv
+	}()
 
 	cfg, err := RenderConfig(ConfigParams{
 		RegistryPath:       o.RegistryDir,

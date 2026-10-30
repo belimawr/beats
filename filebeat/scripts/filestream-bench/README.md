@@ -113,7 +113,7 @@ harness immediately (Filebeat may keep running).
 | `metrics.ndjson` | one sample per tick: `/stats`, `/inputs/`, `/proc/<pid>/status`, registry sizes, CPU% |
 | `profiles.ndjson` | one record per capture, including `heap?debug=1` MemStats |
 | `profiles/NNN-<label>-<elapsed>s/` | `heap.pb.gz`, `goroutine.txt` (debug=2), `cpu.pb.gz` |
-| `run.json` | timeline: start, ready, ingested, SIGTERM, exit |
+| `run.json` | timeline: start, ready, ingested, SIGTERM, exit; Filebeat version from `<filebeat-bin> version` plus Go build info (`vcs.revision` is the commit fallback for builds without the ldflags commit; older runs fall back to the `Build info` log line) |
 | `summary.json` | full report data: stage timings, per-metric peak/steady/shutdown stats, per-profile heap points, parsed `go tool pprof -top -sample_index=inuse_space` rows, top retainers |
 | `summary.md` | stage timings, key metric bullets, embedded charts |
 | `charts/*.svg` | charts embedded in `summary.md`, plus their gnuplot scripts (`*.gp`) and data (`*.dat`) |
