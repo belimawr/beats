@@ -102,7 +102,7 @@ func parseFlags(args []string) (cliConfig, error) {
 	fs.DurationVar(&c.cpuProfileDuration, "cpu-profile-duration", 10*time.Second, "duration of each CPU profile")
 	fs.DurationVar(&c.maxDuration, "max-duration", 0, "maximum time from start to SIGTERM; 0 disables")
 	fs.DurationVar(&c.readyTimeout, "ready-timeout", 2*time.Minute, "maximum wait for the HTTP endpoint")
-	fs.DurationVar(&c.shutdownTimeout, "shutdown-timeout", 10*time.Minute, "maximum wait after SIGTERM before SIGKILL")
+	fs.DurationVar(&c.shutdownTimeout, "shutdown-timeout", 0, "maximum wait after SIGTERM before SIGKILL; 0 waits indefinitely")
 
 	if err := fs.Parse(args); err != nil {
 		return c, err
@@ -132,12 +132,14 @@ func (c *cliConfig) validate() error {
 		"steady-profile-interval": c.steadyProfileInterval,
 		"cpu-profile-duration":    c.cpuProfileDuration,
 		"ready-timeout":           c.readyTimeout,
-		"shutdown-timeout":        c.shutdownTimeout,
 		"check-interval":          c.checkInterval,
 	} {
 		if d <= 0 {
 			return fmt.Errorf("--%s must be > 0", name)
 		}
+	}
+	if c.shutdownTimeout < 0 {
+		return errors.New("--shutdown-timeout must be >= 0")
 	}
 	if c.harvesterLimit < 0 {
 		return errors.New("--harvester-limit must be >= 0")

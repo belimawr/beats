@@ -69,7 +69,7 @@ filestream-bench --report-only --run-dir /tmp/fsb/runs/<run> --work-dir /tmp/fsb
 | `--cpu-profile-duration` | `10s` | CPU profile length |
 | `--max-duration` | `0` (off) | max time from start to SIGTERM |
 | `--ready-timeout` | `2m` | max wait for HTTP endpoint |
-| `--shutdown-timeout` | `10m` | max wait after SIGTERM before SIGKILL |
+| `--shutdown-timeout` | `0` (off) | max wait after SIGTERM before SIGKILL; `0` waits until Filebeat exits on its own, logging a status line every 30s |
 
 Boolean flags need `=` to be set false, e.g. `--close-on-eof=false`.
 
@@ -101,7 +101,9 @@ Boolean flags need `=` to be set false, e.g. `--close-on-eof=false`.
 Then: `--steady-wait`, `pre-shutdown` profile, SIGTERM, telemetry and
 shutdown-cadence profiles until exit. Filebeat runs in its own process group;
 Ctrl-C triggers SIGTERM and still produces a report, a second Ctrl-C exits the
-harness immediately (Filebeat may keep running).
+harness immediately (Filebeat may keep running). By default the harness waits
+for Filebeat to exit after SIGTERM however long it takes; set
+`--shutdown-timeout` to SIGKILL it after that duration instead.
 
 ## Output (`<run-dir>`)
 

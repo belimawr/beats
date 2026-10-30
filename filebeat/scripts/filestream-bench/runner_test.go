@@ -18,17 +18,23 @@
 package main
 
 import (
+	"bufio"
 	"fmt"
+	"log"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"os/exec"
+	"os/signal"
 	"path/filepath"
+	"runtime"
 	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -631,6 +637,110 @@ func TestProgressPercent(t *testing.T) {
 	for _, tc := range tests {
 		assert.InDelta(t, tc.want, progressPercent(tc.o, tc.st), 1e-6, "progressPercent: %s", tc.name)
 	}
+}
+
+const slowExitEnv = "FSBENCH_SLOW_EXIT"
+
+// slowExit is a test-binary mode: print "ready", then exit 0 the given
+// duration after SIGTERM.
+func slowExit(delay string) int {
+	d, err := time.ParseDuration(delay)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 2
+	}
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, syscall.SIGTERM)
+	fmt.Fprintln(os.Stdout, "ready")
+	<-sig
+	time.Sleep(d)
+	return 0
+}
+
+// startSlowExit starts the test binary in slowExit mode and waits until its
+// SIGTERM handler is installed.
+func startSlowExit(t *testing.T, delay time.Duration) *fbProcess {
+	self, err := os.Executable()
+	require.NoError(t, err, "test executable path")
+	cmd := exec.Command(self, "-test.run=^$") //nolint:noctx // shutdownProcess owns the process lifetime
+	cmd.Env = append(os.Environ(), slowExitEnv+"="+delay.String())
+	out, err := cmd.StdoutPipe()
+	require.NoError(t, err, "stdout pipe")
+	require.NoError(t, cmd.Start(), "start slow-exit process")
+	line, err := bufio.NewReader(out).ReadString('\n')
+	require.NoError(t, err, "read readiness line")
+	require.Equal(t, "ready\n", line, "slow-exit process ready")
+	p := &fbProcess{cmd: cmd, start: time.Now(), exited: make(chan struct{})}
+	go func() {
+		p.exitErr = cmd.Wait()
+		p.exitTime = time.Now()
+		close(p.exited)
+	}()
+	t.Cleanup(func() {
+		if p.alive() {
+			_ = cmd.Process.Kill()
+			<-p.exited
+		}
+	})
+	return p
+}
+
+func TestShutdownProcess(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("SIGTERM semantics are unix-only")
+	}
+
+	t.Run("no timeout waits for graceful exit", func(t *testing.T) {
+		const delay = 1500 * time.Millisecond
+		proc := startSlowExit(t, delay)
+		var logs strings.Builder
+		var res RunResult
+		shutdownProcess(log.New(&logs, "", 0), proc, &res, 0, 200*time.Millisecond)
+		assert.False(t, res.Killed, "no SIGKILL without --shutdown-timeout; logs:\n%s", logs.String())
+		assert.Equal(t, 0, proc.cmd.ProcessState.ExitCode(), "graceful exit code")
+		assert.GreaterOrEqual(t, proc.exitTime.Sub(res.SigtermTime), delay, "waited for the process to exit on its own")
+		assert.Contains(t, logs.String(), "no --shutdown-timeout, Ctrl-C again to abort the harness", "SIGTERM line explains the wait")
+		assert.GreaterOrEqual(t, strings.Count(logs.String(), "since SIGTERM"), 3, "periodic status lines while waiting; logs:\n%s", logs.String())
+		assert.Contains(t, logs.String(), "run: filebeat exited after", "exit logged")
+	})
+
+	t.Run("positive timeout kills", func(t *testing.T) {
+		proc := startSlowExit(t, time.Minute)
+		var logs strings.Builder
+		var res RunResult
+		start := time.Now()
+		shutdownProcess(log.New(&logs, "", 0), proc, &res, 300*time.Millisecond, time.Hour)
+		assert.True(t, res.Killed, "SIGKILL after --shutdown-timeout; logs:\n%s", logs.String())
+		assert.Less(t, time.Since(start), 30*time.Second, "did not wait for the graceful exit")
+		assert.Contains(t, logs.String(), "SIGKILL after 300ms", "SIGTERM line names the timeout")
+	})
+
+	t.Run("exited process is a no-op", func(t *testing.T) {
+		proc := startSlowExit(t, 0)
+		require.NoError(t, proc.cmd.Process.Signal(syscall.SIGTERM), "terminate")
+		<-proc.exited
+		var res RunResult
+		shutdownProcess(testLogger(), proc, &res, 0, time.Hour)
+		assert.True(t, res.SigtermTime.IsZero(), "no SIGTERM sent to an exited process")
+	})
+}
+
+func TestParseFlagsShutdownTimeout(t *testing.T) {
+	work := t.TempDir()
+	c, err := parseFlags([]string{"--work-dir", work})
+	require.NoError(t, err, "default flags are valid")
+	assert.Zero(t, c.shutdownTimeout, "--shutdown-timeout defaults to 0 (wait indefinitely)")
+
+	c, err = parseFlags([]string{"--work-dir", work, "--shutdown-timeout", "0"})
+	require.NoError(t, err, "explicit 0 is valid")
+	assert.Zero(t, c.shutdownTimeout, "explicit 0")
+
+	c, err = parseFlags([]string{"--work-dir", work, "--shutdown-timeout", "5m"})
+	require.NoError(t, err, "positive timeout is valid")
+	assert.Equal(t, 5*time.Minute, c.shutdownTimeout, "positive timeout kept")
+
+	_, err = parseFlags([]string{"--work-dir", work, "--shutdown-timeout", "-1s"})
+	assert.EqualError(t, err, "--shutdown-timeout must be >= 0", "negative timeout rejected")
 }
 
 func TestCheckPortFree(t *testing.T) {

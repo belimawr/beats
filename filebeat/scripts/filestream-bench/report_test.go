@@ -51,6 +51,9 @@ func TestMain(m *testing.M) {
 	if os.Getenv(fakeFilebeatEnv) == "1" {
 		os.Exit(fakeFilebeat())
 	}
+	if d := os.Getenv(slowExitEnv); d != "" {
+		os.Exit(slowExit(d))
+	}
 	os.Exit(m.Run())
 }
 
@@ -201,7 +204,7 @@ func TestRunEndToEndWithFakeFilebeat(t *testing.T) {
 		SteadyProfileInterval: time.Second,
 		CPUProfileDuration:    time.Second,
 		ReadyTimeout:          10 * time.Second,
-		ShutdownTimeout:       10 * time.Second,
+		ShutdownTimeout:       0, // wait for the graceful exit
 	}
 
 	stale := filepath.Join(opts.RegistryDir, "stale")

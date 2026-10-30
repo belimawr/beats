@@ -1441,7 +1441,7 @@ func Run(ctx context.Context, logger *log.Logger, o RunOptions) (res RunResult, 
 		if ctx.Err() != nil {
 			res.Interrupted = true
 		}
-		shutdownProcess(logger, proc, &res, o.ShutdownTimeout)
+		shutdownProcess(logger, proc, &res, o.ShutdownTimeout, shutdownStatusInterval)
 		return res, err
 	}
 	res.ReadyTime = time.Now()
@@ -1525,29 +1525,53 @@ wait:
 	}
 
 	phase.Set(phaseShutdown)
-	shutdownProcess(logger, proc, &res, o.ShutdownTimeout)
+	shutdownProcess(logger, proc, &res, o.ShutdownTimeout, shutdownStatusInterval)
 	return res, nil
 }
 
-func shutdownProcess(logger *log.Logger, proc *fbProcess, res *RunResult, timeout time.Duration) {
+// shutdownStatusInterval is how often shutdownProcess logs that it is still
+// waiting for Filebeat to exit.
+const shutdownStatusInterval = 30 * time.Second
+
+// shutdownProcess sends SIGTERM and waits for Filebeat to exit. A positive
+// timeout is followed by SIGKILL; timeout <= 0 waits indefinitely (a second
+// Ctrl-C terminates the harness).
+func shutdownProcess(logger *log.Logger, proc *fbProcess, res *RunResult, timeout, statusEvery time.Duration) {
 	if !proc.alive() {
 		return
 	}
 	res.SigtermTime = time.Now()
-	logger.Printf("run: sending SIGTERM to pid=%d", proc.cmd.Process.Pid)
+	limit := "no --shutdown-timeout, Ctrl-C again to abort the harness"
+	if timeout > 0 {
+		limit = fmt.Sprintf("SIGKILL after %s", timeout)
+	}
+	logger.Printf("run: sending SIGTERM to pid=%d (%s)", proc.cmd.Process.Pid, limit)
 	if err := proc.terminate(); err != nil {
 		logger.Printf("run: SIGTERM failed: %v", err)
 	}
-	t := time.NewTimer(timeout)
-	defer t.Stop()
-	select {
-	case <-proc.exited:
-		logger.Printf("run: filebeat exited after %s", proc.exitTime.Sub(res.SigtermTime).Round(time.Millisecond))
-	case <-t.C:
-		logger.Printf("run: filebeat did not exit within %s, killing", timeout)
-		res.Killed = true
-		_ = proc.cmd.Process.Kill()
-		<-proc.exited
+	var deadline <-chan time.Time
+	if timeout > 0 {
+		t := time.NewTimer(timeout)
+		defer t.Stop()
+		deadline = t.C
+	}
+	status := time.NewTicker(statusEvery)
+	defer status.Stop()
+	for {
+		select {
+		case <-proc.exited:
+			logger.Printf("run: filebeat exited after %s", proc.exitTime.Sub(res.SigtermTime).Round(time.Millisecond))
+			return
+		case <-status.C:
+			logger.Printf("run: waiting for filebeat pid=%d to exit: %s since SIGTERM (%s)",
+				proc.cmd.Process.Pid, time.Since(res.SigtermTime).Round(time.Second), limit)
+		case <-deadline:
+			logger.Printf("run: filebeat did not exit within %s, killing", timeout)
+			res.Killed = true
+			_ = proc.cmd.Process.Kill()
+			<-proc.exited
+			return
+		}
 	}
 }
 
