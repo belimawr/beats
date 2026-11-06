@@ -617,6 +617,12 @@ func TestParseOrchestratorFlags(t *testing.T) {
 	assert.Equal(t, "y.yml", f.configPath, "--config")
 	assert.True(t, f.keepVMs, "--keep-vms")
 
+	for _, cmd := range []string{"up", "bench", "pull", "down", "run"} {
+		f, err = parseOrchestratorFlags(cmd, []string{"--only", "a"})
+		require.NoError(t, err, "--only on %s", cmd)
+		assert.Equal(t, "a", f.only, "--only on %s", cmd)
+	}
+
 	_, err = parseOrchestratorFlags("up", []string{"--keep-vms"})
 	var ue usageError
 	assert.ErrorAs(t, err, &ue, "--keep-vms is only valid for run")
@@ -666,6 +672,125 @@ benchmarks:
 	o.flags.only = ""
 	_, err = o.selectBenchmarks(st)
 	assert.Error(t, err, "benchmark without VM")
+}
+
+func onlyTestOrchestrator(t *testing.T, only string) *orchestrator {
+	t.Helper()
+	cfg, err := parseTestConfig(t, gcpHeader+`
+benchmarks:
+  - {name: "a.1", filebeat: {version: "1"}, output_dir: /o/a}
+  - {name: b, filebeat: {version: "1"}, output_dir: /o/b}
+  - {name: c, filebeat: {version: "1"}, output_dir: /o/c}
+`, "/base")
+	require.NoError(t, err, "config")
+	return newOrchestrator(log.New(io.Discard, "", 0), cfg, orchFlags{only: only})
+}
+
+func TestFilterConfigured(t *testing.T) {
+	names := func(bs []resolvedBenchmark) []string {
+		var out []string
+		for _, b := range bs {
+			out = append(out, b.Name)
+		}
+		return out
+	}
+
+	tests := []struct {
+		name    string
+		only    string
+		want    []string
+		wantErr bool
+	}{
+		{name: "empty selects all", only: "", want: []string{"a.1", "b", "c"}},
+		{name: "by name", only: "b", want: []string{"b"}},
+		{name: "by slug", only: "a-1", want: []string{"a.1"}},
+		{name: "name and slug keep config order", only: " c , a.1 ", want: []string{"a.1", "c"}},
+		{name: "unknown", only: "b,nope", wantErr: true},
+		{name: "only separators", only: ",", wantErr: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := onlyTestOrchestrator(t, tc.only).filterConfigured()
+			if tc.wantErr {
+				var ue usageError
+				assert.ErrorAs(t, err, &ue, "invalid --only must be a usageError")
+				return
+			}
+			require.NoError(t, err, "filterConfigured")
+			assert.Equal(t, tc.want, names(got), "selected benchmarks")
+		})
+	}
+}
+
+func TestUpStateMerging(t *testing.T) {
+	o := onlyTestOrchestrator(t, "b")
+	dir := t.TempDir()
+	o.statePath = filepath.Join(dir, "state.json")
+
+	t.Run("no state file", func(t *testing.T) {
+		st, err := o.readStateForUp()
+		require.NoError(t, err, "readStateForUp")
+		assert.Empty(t, st.Benchmarks, "fresh state")
+		assert.Equal(t, providerGCP, st.Provider, "provider")
+	})
+
+	require.NoError(t, writeState(o.statePath, orchState{
+		Version:  stateVersion,
+		Provider: providerGCP,
+		Benchmarks: map[string]stateBenchmark{
+			"a.1": {Slug: "a-1", IP: "1.1.1.1"},
+		},
+	}), "writing state")
+
+	t.Run("same provider keeps VMs", func(t *testing.T) {
+		st, err := o.readStateForUp()
+		require.NoError(t, err, "readStateForUp")
+		require.Contains(t, st.Benchmarks, "a.1", "existing VM preserved")
+
+		sel, err := o.filterConfigured()
+		require.NoError(t, err, "filterConfigured")
+		assert.Equal(t, []string{"a-1", "b"}, upSlugs(st, sel), "slugs must be the union of state and selection")
+	})
+
+	t.Run("other provider starts fresh", func(t *testing.T) {
+		other := onlyTestOrchestrator(t, "b")
+		other.statePath = o.statePath
+		other.cfg.Provider = providerMultipass
+		st, err := other.readStateForUp()
+		require.NoError(t, err, "readStateForUp")
+		assert.Empty(t, st.Benchmarks, "VMs of another provider are not carried over")
+	})
+
+	t.Run("corrupt state", func(t *testing.T) {
+		bad := onlyTestOrchestrator(t, "b")
+		bad.statePath = filepath.Join(dir, "bad.json")
+		require.NoError(t, os.WriteFile(bad.statePath, []byte("{"), 0o644), "write")
+		_, err := bad.readStateForUp()
+		assert.Error(t, err, "a corrupt state file must not be overwritten")
+	})
+}
+
+func TestRemainingAfterDown(t *testing.T) {
+	o := onlyTestOrchestrator(t, "a.1")
+	st := orchState{Benchmarks: map[string]stateBenchmark{
+		"a.1": {Slug: "a-1"},
+		"b":   {Slug: "b"},
+	}}
+
+	sel, err := o.filterConfigured()
+	require.NoError(t, err, "filterConfigured")
+	remaining := remainingAfterDown(st, sel)
+	assert.Equal(t, map[string]stateBenchmark{"b": {Slug: "b"}}, remaining, "unselected VMs remain")
+	assert.Len(t, st.Benchmarks, 2, "the input state must not be modified")
+
+	o.flags.only = "a.1,b,c"
+	sel, err = o.filterConfigured()
+	require.NoError(t, err, "filterConfigured")
+	assert.Empty(t, remainingAfterDown(st, sel), "selecting every VM leaves none")
+
+	st.Benchmarks["orphan"] = stateBenchmark{Slug: "orphan"}
+	assert.Equal(t, []string{"orphan"}, upSlugs(orchState{Benchmarks: remainingAfterDown(st, sel)}, nil),
+		"VMs not in the config stay in the state")
 }
 
 // fakeShell serves a remote log. The first stream breaks after cut lines and

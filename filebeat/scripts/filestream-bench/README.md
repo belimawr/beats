@@ -168,20 +168,29 @@ Requires `git`, `go`, `tofu`, `ansible-playbook`, `ssh` and `rsync`/`scp` in
 | `up` | build `filestream-bench` (+ Filebeat for `local`/`ref`/`repo`), `tofu apply` one VM per benchmark, write the state file and `inventory.ini`, run Ansible |
 | `bench` | start every selected benchmark detached (`systemd-run`, survives SSH drops), tail its log prefixed with `[<name>]`, then `pull` |
 | `pull` | rsync `runs/current`, `bench.log` and the corpus `manifest.json` into `output_dir`, then build `summary.json`, `summary.md` and `charts/` locally |
-| `down` | `tofu destroy` and remove the state file |
+| `down` | `tofu destroy` and remove the state file; with `--only`, destroy just the selected VMs |
 | `run` | `up` + `bench` + `down`; VMs are kept if an artifact pull failed |
 
 ```sh
-filestream-bench up    -c benchmarks.yml
+filestream-bench up    -c benchmarks.yml [--only a,b]
 filestream-bench bench -c benchmarks.yml [--only a,b]
 filestream-bench pull  -c benchmarks.yml [--only a] [--wait=false]
-filestream-bench down  -c benchmarks.yml
-filestream-bench run   -c benchmarks.yml [--keep-vms]
+filestream-bench down  -c benchmarks.yml [--only a]
+filestream-bench run   -c benchmarks.yml [--only a] [--keep-vms]
 ```
 
 Common flags: `-c/--config` (default `benchmarks.yml`), `--state-file`
-(default `<config dir>/.filestream-bench-state.json`). `--only` (bench, pull)
-selects benchmarks by name. `--wait` (pull, default `true`) follows a
+(default `<config dir>/.filestream-bench-state.json`). `--only` (up, bench,
+pull, down, run) selects benchmarks by name or slug (comma-separated):
+
+- `up --only b` builds, provisions and configures only `b`. VMs already in the
+  state file (same provider) are kept and not reconfigured.
+- `down --only a` destroys only `a` and keeps the other VMs and the shared
+  network. When no VM remains, it runs a full `tofu destroy` and removes the
+  state file.
+- `run --only a` brings up, benchmarks and tears down only `a`.
+
+`--wait` (pull, default `true`) follows a
 still-running benchmark until it finishes. `--keep-vms` (run) skips `down`.
 
 If the SSH connection drops, the log tail reconnects every 5s and resumes at

@@ -148,9 +148,9 @@ func goBuildEnv(arch string, cgo0 bool) []string {
 	return env
 }
 
-// buildArtifacts builds filestream-bench and every Filebeat that has to be
-// compiled locally into buildDir.
-func buildArtifacts(ctx context.Context, logger *log.Logger, cfg *orchestratorConfig, srcDir, buildDir string) (builtArtifacts, error) {
+// buildArtifacts builds filestream-bench and every Filebeat of benchmarks that
+// has to be compiled locally into buildDir.
+func buildArtifacts(ctx context.Context, logger *log.Logger, cfg *orchestratorConfig, benchmarks []resolvedBenchmark, srcDir, buildDir string) (builtArtifacts, error) {
 	arch := targetArch(cfg, runtime.GOARCH)
 	out := builtArtifacts{Filebeat: map[string]string{}}
 
@@ -167,7 +167,7 @@ func buildArtifacts(ctx context.Context, logger *log.Logger, cfg *orchestratorCo
 	}
 
 	built := map[filebeatBuildKey]string{}
-	for _, b := range cfg.Resolved {
+	for _, b := range benchmarks {
 		if !b.Filebeat.needsBuild() {
 			continue
 		}

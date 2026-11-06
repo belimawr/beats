@@ -26,11 +26,13 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"maps"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -106,10 +108,7 @@ func parseOrchestratorFlags(cmd string, args []string) (orchFlags, error) {
 	fs.StringVar(&f.configPath, "config", defaultConfigFile, "path to the YAML benchmark config")
 	fs.StringVar(&f.configPath, "c", defaultConfigFile, "shorthand for --config")
 	fs.StringVar(&f.stateFile, "state-file", "", "state JSON file (default <dir-of-config>/"+stateFileName+")")
-	switch cmd {
-	case "bench", "pull":
-		fs.StringVar(&f.only, "only", "", "comma-separated benchmark names to select (default all)")
-	}
+	fs.StringVar(&f.only, "only", "", "comma-separated benchmark names or slugs to select (default all)")
 	switch cmd {
 	case "pull":
 		fs.BoolVar(&f.wait, "wait", true, "wait for a still-running benchmark to finish before pulling")
@@ -638,34 +637,48 @@ type selected struct {
 	ssh   sshShell
 }
 
-// selectBenchmarks applies --only and joins the config with the state file.
-func (o *orchestrator) selectBenchmarks(st orchState) ([]selected, error) {
-	var only map[string]bool
-	if strings.TrimSpace(o.flags.only) != "" {
-		only = map[string]bool{}
-		for n := range strings.SplitSeq(o.flags.only, ",") {
-			if n = strings.TrimSpace(n); n != "" {
-				only[n] = true
-			}
+// filterConfigured returns the configured benchmarks selected by --only,
+// matching either the name or the slug. All benchmarks are returned when
+// --only is empty. Unknown names are a usageError.
+func (o *orchestrator) filterConfigured() ([]resolvedBenchmark, error) {
+	if strings.TrimSpace(o.flags.only) == "" {
+		return o.cfg.Resolved, nil
+	}
+	only := map[string]bool{}
+	for n := range strings.SplitSeq(o.flags.only, ",") {
+		if n = strings.TrimSpace(n); n != "" {
+			only[n] = true
 		}
-		for n := range only {
-			found := false
-			for _, b := range o.cfg.Resolved {
-				if b.Name == n || b.Slug == n {
-					found = true
-				}
-			}
-			if !found {
-				return nil, usageError{fmt.Errorf("--only: unknown benchmark %q", n)}
-			}
+	}
+	if len(only) == 0 {
+		return nil, usageError{errors.New("--only: no benchmark names given")}
+	}
+	for _, n := range slices.Sorted(maps.Keys(only)) {
+		if !slices.ContainsFunc(o.cfg.Resolved, func(b resolvedBenchmark) bool {
+			return b.Name == n || b.Slug == n
+		}) {
+			return nil, usageError{fmt.Errorf("--only: unknown benchmark %q", n)}
 		}
 	}
 
-	var out []selected
+	var out []resolvedBenchmark
 	for _, b := range o.cfg.Resolved {
-		if only != nil && !only[b.Name] && !only[b.Slug] {
-			continue
+		if only[b.Name] || only[b.Slug] {
+			out = append(out, b)
 		}
+	}
+	return out, nil
+}
+
+// selectBenchmarks applies --only and joins the config with the state file.
+func (o *orchestrator) selectBenchmarks(st orchState) ([]selected, error) {
+	benchmarks, err := o.filterConfigured()
+	if err != nil {
+		return nil, err
+	}
+
+	var out []selected
+	for _, b := range benchmarks {
 		vm, ok := st.Benchmarks[b.Name]
 		if !ok {
 			return nil, fmt.Errorf("benchmark %q has no VM in %s: run `filestream-bench up`", b.Name, o.statePath)
