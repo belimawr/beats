@@ -22,10 +22,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -285,13 +287,66 @@ func requireTools(names ...string) error {
 	return nil
 }
 
-// up builds the binaries, provisions one VM per benchmark with OpenTofu and
-// installs filestream-bench and Filebeat on them with Ansible.
+// readStateForUp returns the state `up` extends: the existing state when it
+// belongs to the configured provider, otherwise an empty one.
+func (o *orchestrator) readStateForUp() (orchState, error) {
+	st, err := readState(o.statePath)
+	switch {
+	case err == nil && st.Provider == o.cfg.Provider:
+	case err == nil || errors.Is(err, os.ErrNotExist):
+		st = orchState{}
+	default:
+		return orchState{}, err
+	}
+	st.Version = stateVersion
+	st.Provider = o.cfg.Provider
+	st.StateDir = o.stateDir
+	st.SSHKeyFile = o.cfg.sshIdentityFile()
+	if st.Benchmarks == nil {
+		st.Benchmarks = map[string]stateBenchmark{}
+	}
+	return st, nil
+}
+
+// upSlugs returns the sorted union of the slugs of the VMs already in st and
+// of the selected benchmarks, so that `tofu apply` does not destroy VMs that
+// are not selected.
+func upSlugs(st orchState, selected []resolvedBenchmark) []string {
+	set := map[string]struct{}{}
+	for _, vm := range st.Benchmarks {
+		set[vm.Slug] = struct{}{}
+	}
+	for _, b := range selected {
+		set[b.Slug] = struct{}{}
+	}
+	return slices.Sorted(maps.Keys(set))
+}
+
+// remainingAfterDown returns the VMs of st that are not selected.
+func remainingAfterDown(st orchState, selected []resolvedBenchmark) map[string]stateBenchmark {
+	remaining := maps.Clone(st.Benchmarks)
+	for _, b := range selected {
+		delete(remaining, b.Name)
+	}
+	return remaining
+}
+
+// up builds the binaries, provisions one VM per selected benchmark with
+// OpenTofu and installs filestream-bench and Filebeat on them with Ansible.
+// VMs of unselected benchmarks already in the state file are kept untouched.
 func (o *orchestrator) up(ctx context.Context) error {
+	selectedBenchmarks, err := o.filterConfigured()
+	if err != nil {
+		return err
+	}
 	if err := requireTools("git", "go", "tofu", "ansible-playbook"); err != nil {
 		return err
 	}
 	layout, err := locateIAC(ctx)
+	if err != nil {
+		return err
+	}
+	st, err := o.readStateForUp()
 	if err != nil {
 		return err
 	}
@@ -302,7 +357,7 @@ func (o *orchestrator) up(ctx context.Context) error {
 	}
 	defer os.RemoveAll(buildDir)
 
-	art, err := buildArtifacts(ctx, o.logger, o.cfg, layout.SrcDir, buildDir)
+	art, err := buildArtifacts(ctx, o.logger, o.cfg, selectedBenchmarks, layout.SrcDir, buildDir)
 	if err != nil {
 		return err
 	}
@@ -311,16 +366,14 @@ func (o *orchestrator) up(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	slugs := make([]string, 0, len(o.cfg.Resolved))
-	for _, b := range o.cfg.Resolved {
-		slugs = append(slugs, b.Slug)
-	}
+	slugs := upSlugs(st, selectedBenchmarks)
 	vars, err := tofuVarArgs(o.cfg, slugs)
 	if err != nil {
 		return err
 	}
 
-	o.logger.Printf("provisioning %d VM(s) with OpenTofu (%s) in %s", len(slugs), o.cfg.Provider, moduleDir)
+	o.logger.Printf("provisioning %d VM(s) (%d selected) with OpenTofu (%s) in %s",
+		len(slugs), len(selectedBenchmarks), o.cfg.Provider, moduleDir)
 	if err := runStreaming(ctx, moduleDir, nil, "tofu", "init", "-input=false"); err != nil {
 		return err
 	}
@@ -337,15 +390,8 @@ func (o *orchestrator) up(ctx context.Context) error {
 		return err
 	}
 
-	st := orchState{
-		Version:    stateVersion,
-		Provider:   o.cfg.Provider,
-		StateDir:   o.stateDir,
-		SSHKeyFile: o.cfg.sshIdentityFile(),
-		Benchmarks: map[string]stateBenchmark{},
-	}
 	var hosts []inventoryHost
-	for _, b := range o.cfg.Resolved {
+	for _, b := range selectedBenchmarks {
 		ip := outputs.IPs[b.Slug]
 		if ip == "" {
 			return fmt.Errorf("tofu output has no instance_ips entry for %q", b.Slug)
@@ -387,13 +433,22 @@ func (o *orchestrator) up(ctx context.Context) error {
 	if _, set := os.LookupEnv("ANSIBLE_CONFIG"); !set {
 		env = append(env, "ANSIBLE_CONFIG="+layout.AnsibleCfg)
 	}
-	o.logger.Printf("configuring VMs with Ansible (inventory %s)", inventory)
+	o.logger.Printf("configuring %d VM(s) with Ansible (inventory %s)", len(hosts), inventory)
 	return runStreaming(ctx, filepath.Dir(layout.PlaybookPath), env, "ansible-playbook",
 		"-i", inventory, "-f", strconv.Itoa(len(hosts)), layout.PlaybookPath)
 }
 
-// down destroys the VMs and removes the state file.
+// down destroys the VMs and removes the state file. With --only only the
+// selected VMs are destroyed; when other VMs remain in the state file the
+// shared infrastructure (network, firewall) is kept.
 func (o *orchestrator) down(ctx context.Context) error {
+	var selectedBenchmarks []resolvedBenchmark
+	if o.flags.only != "" {
+		var err error
+		if selectedBenchmarks, err = o.filterConfigured(); err != nil {
+			return err
+		}
+	}
 	if err := requireTools("tofu"); err != nil {
 		return err
 	}
@@ -403,11 +458,15 @@ func (o *orchestrator) down(ctx context.Context) error {
 	}
 
 	var slugs []string
+	var remaining map[string]stateBenchmark
 	st, stErr := readState(o.statePath)
 	switch {
 	case stErr == nil:
 		for _, n := range st.sortedNames() {
 			slugs = append(slugs, st.Benchmarks[n].Slug)
+		}
+		if o.flags.only != "" {
+			remaining = remainingAfterDown(st, selectedBenchmarks)
 		}
 	case errors.Is(stErr, os.ErrNotExist):
 		o.logger.Printf("warning: %v; destroying the instances listed in the config", stErr)
@@ -422,14 +481,19 @@ func (o *orchestrator) down(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	if err := runStreaming(ctx, moduleDir, nil, "tofu", "init", "-input=false"); err != nil {
+		return err
+	}
+
+	if len(remaining) > 0 {
+		return o.downPartial(ctx, moduleDir, st, remaining)
+	}
+
 	vars, err := tofuVarArgs(o.cfg, slugs)
 	if err != nil {
 		return err
 	}
 	o.logger.Printf("destroying VMs (%s) in %s", o.cfg.Provider, moduleDir)
-	if err := runStreaming(ctx, moduleDir, nil, "tofu", "init", "-input=false"); err != nil {
-		return err
-	}
 	if err := runStreaming(ctx, moduleDir, nil, "tofu",
 		append([]string{"destroy", "-auto-approve", "-input=false"}, vars...)...); err != nil {
 		return err
@@ -438,5 +502,27 @@ func (o *orchestrator) down(ctx context.Context) error {
 		return fmt.Errorf("removing state file: %w", err)
 	}
 	_ = os.RemoveAll(o.stateDir) //nolint:gosec // cleaning up state directory
+	return nil
+}
+
+// downPartial destroys the VMs of st that are not in remaining by applying
+// the module with only the remaining slugs. This works for every provider and
+// keeps the shared infrastructure of the remaining VMs.
+func (o *orchestrator) downPartial(ctx context.Context, moduleDir string, st orchState, remaining map[string]stateBenchmark) error {
+	st.Benchmarks = remaining
+	slugs := upSlugs(st, nil)
+	vars, err := tofuVarArgs(o.cfg, slugs)
+	if err != nil {
+		return err
+	}
+	o.logger.Printf("destroying selected VMs (%s) in %s, keeping %d", o.cfg.Provider, moduleDir, len(slugs))
+	if err := runStreaming(ctx, moduleDir, nil, "tofu",
+		append([]string{"apply", "-auto-approve", "-input=false"}, vars...)...); err != nil {
+		return err
+	}
+	if err := writeState(o.statePath, st); err != nil {
+		return fmt.Errorf("writing state: %w", err)
+	}
+	o.logger.Printf("state updated in %s", o.statePath)
 	return nil
 }

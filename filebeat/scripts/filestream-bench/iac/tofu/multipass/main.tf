@@ -84,7 +84,7 @@ resource "terraform_data" "agent" {
 
   provisioner "local-exec" {
     when    = destroy
-    command = "multipass delete --purge ${self.input.name}"
+    command = "multipass delete --purge ${self.input.name} 2>/dev/null || true"
   }
 }
 
