@@ -376,6 +376,7 @@ func TestLaunchScript(t *testing.T) {
 		"sudo systemd-run --unit=filestream-bench --collect",
 		"--property=User=ubuntu --property=Group=ubuntu",
 		"--property=LimitNOFILE=1048576",
+		"--property=OOMPolicy=continue",
 		"/var/lib/filestream-bench/run-bench.sh",
 	} {
 		assert.Contains(t, script, want, "launch script")

@@ -35,7 +35,7 @@ variable "agent_cpus" {
 
 variable "agent_memory" {
   type    = string
-  default = "8G"
+  default = "16G"
 }
 
 variable "agent_disk" {

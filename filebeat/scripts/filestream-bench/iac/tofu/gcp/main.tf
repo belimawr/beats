@@ -60,9 +60,9 @@ variable "agent_image" {
 }
 
 variable "agent_machine_type" {
-  description = "E2 is GCP's broadest fleet; for arm64 use c4a-highcpu-4 with the arm64 image and hyperdisk-balanced"
+  description = "E2 is GCP's broadest fleet; for arm64 use c4a-standard-4 with the arm64 image and hyperdisk-balanced"
   type        = string
-  default     = "e2-highcpu-4"
+  default     = "e2-standard-4"
 }
 
 variable "agent_disk_type" {

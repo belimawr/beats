@@ -127,6 +127,7 @@ func launchScript(p benchParams) string {
 		"sudo systemd-run --unit=" + remoteUnit + " --collect \\",
 		"  --property=User=" + sshUser + " --property=Group=" + sshUser + " \\",
 		"  --property=LimitNOFILE=1048576 \\",
+		"  --property=OOMPolicy=continue \\",
 		"  " + remoteRunScript,
 		"",
 	}, "\n")
@@ -145,6 +146,8 @@ while :; do
   if ! systemctl is-active --quiet %[4]s.service; then
     sleep 2
     [ -e "$EXIT" ] && break
+    res=$(systemctl show -p Result --value %[4]s.service 2>/dev/null || true)
+    echo "unit %[4]s.service stopped without exit file (result=${res:-unknown})" >&2
     exit %[5]d
   fi
   sleep 2
@@ -345,6 +348,9 @@ func watchRemoteBench(ctx context.Context, sh remoteShell, opts watchOptions) (i
 			err = errors.New("exit status not readable after the log stream ended")
 		}
 		if re, ok := errors.AsType[*remoteExitError](err); ok && re.Code == watchGoneExitCode {
+			if re.Stderr != "" {
+				return 0, fmt.Errorf("benchmark unit stopped without writing %s: %s", remoteExitFile, re.Stderr)
+			}
 			return 0, fmt.Errorf("benchmark unit stopped without writing %s", remoteExitFile)
 		}
 		opts.Logger.Printf("warning: ssh connection lost (%v), reconnecting in %s...", err, opts.RetryDelay)
