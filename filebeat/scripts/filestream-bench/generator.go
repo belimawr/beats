@@ -382,8 +382,8 @@ func writeJSONAtomic(path string, v any) error {
 		return err
 	}
 	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, append(data, '\n'), 0o644); err != nil {
+	if err := os.WriteFile(tmp, append(data, '\n'), 0o644); err != nil { //nolint:gosec // harness writes to user-selected output paths
 		return err
 	}
-	return os.Rename(tmp, path)
+	return os.Rename(tmp, path) //nolint:gosec // harness renames within user-selected output paths
 }
