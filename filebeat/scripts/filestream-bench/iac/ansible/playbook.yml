@@ -1,0 +1,178 @@
+---
+- name: Prepare the benchmark VMs
+  hosts: all
+  become: true
+  gather_facts: false
+  any_errors_fatal: true
+
+  tasks:
+    - name: Wait for SSH to come up
+      ansible.builtin.wait_for_connection:
+        delay: 5
+        sleep: 5
+        timeout: 600
+
+    - name: Wait for cloud-init to finish
+      ansible.builtin.command: cloud-init status --wait
+      changed_when: false
+      failed_when: false
+
+    - name: Gather facts
+      ansible.builtin.setup:
+
+    - name: Configure kernel limits
+      ansible.builtin.copy:
+        dest: /etc/sysctl.d/99-filestream-bench.conf
+        owner: root
+        group: root
+        mode: '0644'
+        content: |
+          fs.file-max = 2097152
+          fs.inotify.max_user_watches = 1048576
+          fs.inotify.max_user_instances = 8192
+
+    - name: Apply sysctl settings
+      ansible.builtin.command: sysctl --system
+      changed_when: false
+
+    - name: Raise open file limits
+      ansible.builtin.copy:
+        dest: /etc/security/limits.d/99-filestream-bench.conf
+        owner: root
+        group: root
+        mode: '0644'
+        content: |
+          * soft nofile 1048576
+          * hard nofile 1048576
+          root soft nofile 1048576
+          root hard nofile 1048576
+
+- name: Install filestream-bench and filebeat
+  hosts: all
+  become: true
+  any_errors_fatal: true
+
+  tasks:
+    - name: Stop any previous filestream-bench transient unit
+      ansible.builtin.command: systemctl stop filestream-bench.service
+      failed_when: false
+      changed_when: false
+
+    - name: Remove any previous filebeat install
+      ansible.builtin.file:
+        path: "{{ filebeat_home }}"
+        state: absent
+
+    - name: Create benchmark directories
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        owner: ubuntu
+        group: ubuntu
+        mode: '0755'
+      loop:
+        - "{{ bench_home }}/bin"
+        - "{{ filebeat_home }}"
+        - "{{ bench_work_dir }}"
+        - "{{ bench_work_dir }}/runs"
+
+    - name: Copy filestream-bench binary
+      ansible.builtin.copy:
+        src: "{{ filestream_bench_binary_path }}"
+        dest: "{{ bench_home }}/bin/filestream-bench"
+        owner: ubuntu
+        group: ubuntu
+        mode: '0755'
+
+    # Source a: local filebeat binary
+    - name: Copy the supplied filebeat binary
+      ansible.builtin.copy:
+        src: "{{ filebeat_binary_path }}"
+        dest: "{{ filebeat_home }}/filebeat"
+        owner: ubuntu
+        group: ubuntu
+        mode: '0755'
+      when: filebeat_binary_path | length > 0
+
+    # Source b: local filebeat tarball
+    - name: Copy the supplied filebeat tar.gz
+      ansible.builtin.copy:
+        src: "{{ filebeat_tarball_path }}"
+        dest: /var/tmp/filebeat.tar.gz
+        mode: '0644'
+      when: filebeat_binary_path | length == 0 and filebeat_tarball_path | length > 0
+
+    - name: Extract the supplied filebeat tar.gz
+      ansible.builtin.unarchive:
+        src: /var/tmp/filebeat.tar.gz
+        dest: "{{ filebeat_home }}"
+        remote_src: true
+        extra_opts: [--strip-components=1]
+      when: filebeat_binary_path | length == 0 and filebeat_tarball_path | length > 0
+
+    # Source c: released or -SNAPSHOT version
+    - name: Download filebeat tar.gz
+      ansible.builtin.get_url:
+        url: "https://artifacts.elastic.co/downloads/beats/filebeat/{{ filebeat_tgz_name }}"
+        dest: /var/tmp/filebeat.tar.gz
+        mode: '0644'
+        timeout: 300
+      when: >-
+        filebeat_binary_path | length == 0 and filebeat_tarball_path | length == 0
+        and filebeat_version | length > 0 and not (filebeat_is_snapshot | bool)
+
+    - name: Look up filebeat snapshot tar.gz URL
+      ansible.builtin.uri:
+        url: "{{ filebeat_artifacts_api }}/{{ filebeat_tgz_name }}"
+        timeout: 300
+        return_content: true
+      register: filebeat_artifact
+      delegate_to: localhost
+      become: false
+      when: >-
+        filebeat_binary_path | length == 0 and filebeat_tarball_path | length == 0
+        and filebeat_version | length > 0 and (filebeat_is_snapshot | bool)
+
+    - name: Download filebeat snapshot tar.gz
+      ansible.builtin.get_url:
+        url: "{{ filebeat_artifact.json.packages[filebeat_tgz_name].url }}"
+        dest: /var/tmp/filebeat.tar.gz
+        mode: '0644'
+        timeout: 300
+      register: filebeat_snapshot_dl
+      until: filebeat_snapshot_dl is succeeded
+      retries: 3
+      delay: 15
+      when: >-
+        filebeat_binary_path | length == 0 and filebeat_tarball_path | length == 0
+        and filebeat_version | length > 0 and (filebeat_is_snapshot | bool)
+
+    - name: Extract the downloaded filebeat tar.gz
+      ansible.builtin.unarchive:
+        src: /var/tmp/filebeat.tar.gz
+        dest: "{{ filebeat_home }}"
+        remote_src: true
+        extra_opts: [--strip-components=1]
+      when: >-
+        filebeat_binary_path | length == 0 and filebeat_tarball_path | length == 0
+        and filebeat_version | length > 0
+
+    - name: Remove the downloaded filebeat tar.gz
+      ansible.builtin.file:
+        path: /var/tmp/filebeat.tar.gz
+        state: absent
+      when: >-
+        filebeat_binary_path | length == 0 and filebeat_tarball_path | length == 0
+        and filebeat_version | length > 0
+
+    - name: Ensure the filebeat binary is executable
+      ansible.builtin.file:
+        path: "{{ filebeat_home }}/filebeat"
+        mode: '0755'
+      when: >-
+        filebeat_binary_path | length == 0 and filebeat_tarball_path | length == 0
+        and filebeat_version | length > 0
+
+    - name: Verify filebeat runs
+      ansible.builtin.command: "{{ filebeat_home }}/filebeat version --strict.perms=false"
+      changed_when: false

@@ -1,0 +1,74 @@
+# Example filestream-bench orchestrator configuration.
+# Copy to benchmarks.yml and adjust.
+
+# Where benchmark VMs run: "gcp" (default) or "multipass".
+provider: gcp
+ssh_public_key_file: ~/.ssh/id_rsa.pub
+
+# Used when provider is "gcp".
+gcp:
+  project: my-gcp-project            # required (or set TF_VAR_gcp_project)
+  owner: my-user                     # required (or set TF_VAR_owner); resource prefix & project label
+  region: us-central1
+  zone: us-central1-a
+  machine_type: e2-highcpu-4         # arm64: c4a-highcpu-4 + arm64 image
+  image: ubuntu-os-cloud/ubuntu-2404-lts-amd64
+  disk_type: pd-balanced
+  disk_gb: 50
+  operator_cidr: ""                  # SSH source CIDR; empty = caller's public IP
+  labels:                            # extra labels, for orgs that require them
+    team: beats
+
+# Used when provider is "multipass".
+multipass:
+  owner: fsbench                     # VM name prefix
+  cpus: 4
+  memory: 8G
+  disk: 50G
+  launch_timeout_seconds: 600
+
+# Values applied to every benchmark unless overridden by the benchmark entry.
+defaults:
+  files: 500000
+  dirs: 5
+  file_size: 10240
+  bytes_per_line: 200
+  backend: memlog                    # memlog | otel_file_storage
+  growing_fingerprint: true
+  harvester_limit: 1000
+  check_interval: 5m
+  close_on_eof: true
+  keep_registry: false
+  steady_wait: 1m
+  max_duration: 0s
+
+# One VM is provisioned per benchmark and executed in parallel.
+# Exactly one Filebeat source per benchmark: version | repo+ref | local | tarball | binary.
+benchmarks:
+  # Released version or -SNAPSHOT, downloaded on the VM.
+  - name: baseline-9.5.6
+    filebeat:
+      version: "9.5.6"
+    output_dir: ./results/baseline-9.5.6
+
+  # Build from a git repository at a ref (branch, tag or commit).
+  - name: main-memlog
+    filebeat:
+      repo: elastic/beats
+      ref: main
+    output_dir: ./results/main-memlog
+
+  # Override per-benchmark parameters inline.
+  - name: pr-otel-storage
+    filebeat:
+      repo: elastic/beats
+      ref: main
+    backend: otel_file_storage
+    files: 250000
+    output_dir: ./results/pr-otel-storage
+
+  # Build from the current working tree.
+  - name: local-tree
+    filebeat:
+      local: true
+    output_dir: ./results/local-tree

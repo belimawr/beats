@@ -152,6 +152,14 @@ func (c *cliConfig) validate() error {
 
 func main() {
 	logger := log.New(os.Stderr, "filestream-bench: ", log.LstdFlags|log.Lmicroseconds)
+
+	// Flag-based invocations stay unchanged; the VM orchestrator is selected
+	// by a leading subcommand word.
+	if len(os.Args) > 1 && isOrchestratorCommand(os.Args[1]) {
+		mainOrchestrator(logger, os.Args[1], os.Args[2:])
+		return
+	}
+
 	cfg, err := parseFlags(os.Args[1:])
 	if err != nil {
 		if errors.Is(err, flag.ErrHelp) {
