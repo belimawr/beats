@@ -15,3 +15,8 @@ filebeat_is_snapshot: "{{ '-SNAPSHOT' in (filebeat_version | string) }}"
 filebeat_artifacts_api: "https://artifacts-api.elastic.co/v1/search/{{ filebeat_version }}"
 tgz_arch: "{{ 'arm64' if ansible_architecture == 'aarch64' else 'x86_64' }}"
 filebeat_tgz_name: "filebeat-{{ filebeat_version }}-linux-{{ tgz_arch }}.tar.gz"
+
+go_version: "{{ lookup('file', (playbook_dir + '/../../../../../.go-version') | realpath) | trim }}"
+go_arch: "{{ 'arm64' if ansible_architecture == 'aarch64' else 'amd64' }}"
+go_tgz_name: "go{{ go_version }}.linux-{{ go_arch }}.tar.gz"
+go_download_url: "https://go.dev/dl/{{ go_tgz_name }}"

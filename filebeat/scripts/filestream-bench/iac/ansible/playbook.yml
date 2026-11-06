@@ -20,6 +20,51 @@
     - name: Gather facts
       ansible.builtin.setup:
 
+    - name: Install gnuplot for report generation
+      ansible.builtin.apt:
+        name:
+          - gnuplot-nox
+        state: present
+        update_cache: true
+
+    - name: Check installed Go version
+      ansible.builtin.command: /usr/local/go/bin/go version
+      register: installed_go
+      changed_when: false
+      failed_when: false
+
+    - name: Install Go {{ go_version }} from go.dev
+      when: installed_go.rc != 0 or ('go' + go_version + ' ') not in installed_go.stdout
+      block:
+        - name: Download Go tarball
+          ansible.builtin.get_url:
+            url: "{{ go_download_url }}"
+            dest: "/var/tmp/{{ go_tgz_name }}"
+            mode: '0644'
+            timeout: 300
+
+        - name: Remove previous /usr/local/go
+          ansible.builtin.file:
+            path: /usr/local/go
+            state: absent
+
+        - name: Extract Go tarball to /usr/local
+          ansible.builtin.unarchive:
+            src: "/var/tmp/{{ go_tgz_name }}"
+            dest: /usr/local
+            remote_src: true
+
+        - name: Remove Go tarball
+          ansible.builtin.file:
+            path: "/var/tmp/{{ go_tgz_name }}"
+            state: absent
+
+    - name: Symlink go binary into /usr/local/bin
+      ansible.builtin.file:
+        src: /usr/local/go/bin/go
+        dest: /usr/local/bin/go
+        state: link
+
     - name: Configure kernel limits
       ansible.builtin.copy:
         dest: /etc/sysctl.d/99-filestream-bench.conf

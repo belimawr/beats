@@ -202,7 +202,7 @@ gcp:                               # project and owner required (or TF_VAR_gcp_p
   owner: my-user
   region: us-central1
   zone: us-central1-a
-  machine_type: e2-highcpu-4       # c4a/n4a or an arm64 image => linux/arm64 builds
+  machine_type: e2-standard-4      # c4a/n4a or an arm64 image => linux/arm64 builds
   image: ubuntu-os-cloud/ubuntu-2404-lts-amd64
   disk_type: pd-balanced
   disk_gb: 50
@@ -212,7 +212,7 @@ gcp:                               # project and owner required (or TF_VAR_gcp_p
 multipass:
   owner: fsbench
   cpus: 4
-  memory: 8G
+  memory: 16G
   disk: 50G
   launch_timeout_seconds: 600
 
