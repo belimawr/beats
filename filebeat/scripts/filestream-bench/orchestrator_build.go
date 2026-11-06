@@ -74,13 +74,25 @@ type builtArtifacts struct {
 	Filebeat map[string]string
 }
 
-// normalizeRepo expands "owner/name" to a GitHub HTTPS URL; URLs, scp-style
-// remotes and absolute paths are kept.
+// normalizeRepo converts "owner/name", "git@github.com:owner/name", or
+// "ssh://git@github.com/owner/name" to a GitHub HTTPS URL so fetches never
+// trigger SSH/YubiKey prompts. Local paths and HTTPS URLs are kept.
 func normalizeRepo(repo string) string {
-	if repo != "" && !strings.Contains(repo, ":") && !strings.HasPrefix(repo, "/") {
-		return "https://github.com/" + repo + ".git"
+	repo = strings.TrimSpace(repo)
+	switch {
+	case repo == "", strings.HasPrefix(repo, "/"):
+		return repo
+	case strings.HasPrefix(repo, "git@github.com:"):
+		path := strings.TrimSuffix(strings.TrimPrefix(repo, "git@github.com:"), ".git")
+		return "https://github.com/" + path + ".git"
+	case strings.HasPrefix(repo, "ssh://git@github.com/"):
+		path := strings.TrimSuffix(strings.TrimPrefix(repo, "ssh://git@github.com/"), ".git")
+		return "https://github.com/" + path + ".git"
+	case !strings.Contains(repo, ":"):
+		return "https://github.com/" + strings.TrimSuffix(repo, ".git") + ".git"
+	default:
+		return repo
 	}
-	return repo
 }
 
 // gitRepoRoot returns the git top level directory containing dir.
@@ -110,7 +122,26 @@ func runOutput(ctx context.Context, dir string, env []string, name string, args 
 }
 
 func goBuildEnv(arch string, cgo0 bool) []string {
-	env := append(os.Environ(), "GOOS=linux", "GOARCH="+arch)
+	// Clear GIT_CONFIG_* and rewrite ssh://git@github.com / git@github.com: to
+	// https://github.com/ via transient GIT_CONFIG_COUNT so neither git nor go
+	// module downloads trigger SSH / YubiKey prompts.
+	var env []string
+	for _, kv := range os.Environ() {
+		if strings.HasPrefix(kv, "GIT_CONFIG_") {
+			continue
+		}
+		env = append(env, kv)
+	}
+	env = append(env,
+		"GOOS=linux",
+		"GOARCH="+arch,
+		"GIT_TERMINAL_PROMPT=0",
+		"GIT_CONFIG_COUNT=2",
+		"GIT_CONFIG_KEY_0=url.https://github.com/.insteadOf",
+		"GIT_CONFIG_VALUE_0=ssh://git@github.com/",
+		"GIT_CONFIG_KEY_1=url.https://github.com/.insteadOf",
+		"GIT_CONFIG_VALUE_1=git@github.com:",
+	)
 	if cgo0 {
 		env = append(env, "CGO_ENABLED=0")
 	}
@@ -155,9 +186,11 @@ func buildArtifacts(ctx context.Context, logger *log.Logger, cfg *orchestratorCo
 	return out, nil
 }
 
-// buildFilebeat mirrors run.sh: build the working tree, or a detached
-// worktree of ref (fetched from repo when set), with the version ldflags.
+// buildFilebeat builds the working tree (when key.Local is true), or fetches
+// ref over HTTPS into a detached worktree without altering remotes, and builds
+// with the version ldflags.
 func buildFilebeat(ctx context.Context, logger *log.Logger, repoRoot string, key filebeatBuildKey, out string) error {
+	gitEnv := goBuildEnv(key.Arch, true)
 	src := repoRoot
 	label := "working-tree"
 	if !key.Local {
@@ -171,7 +204,15 @@ func buildFilebeat(ctx context.Context, logger *log.Logger, repoRoot string, key
 			repo := normalizeRepo(key.Repo)
 			label = repo + "@" + ref
 			logger.Printf("fetching %s %s", repo, ref)
-			if err := runStreaming(ctx, repoRoot, nil, "git", "-C", repoRoot, "fetch", "--quiet", repo, ref); err != nil {
+			if err := runStreaming(ctx, repoRoot, gitEnv, "git", "-C", repoRoot, "fetch", "--quiet", "--no-tags", repo, ref); err != nil {
+				return fmt.Errorf("git fetch: %w", err)
+			}
+			target = "FETCH_HEAD"
+		} else if _, err := runOutput(ctx, repoRoot, gitEnv, "git", "-C", repoRoot, "rev-parse", "--verify", "--quiet", ref+"^{commit}"); err != nil {
+			repo := "https://github.com/elastic/beats.git"
+			label = repo + "@" + ref
+			logger.Printf("fetching %s %s", repo, ref)
+			if err := runStreaming(ctx, repoRoot, gitEnv, "git", "-C", repoRoot, "fetch", "--quiet", "--no-tags", repo, ref); err != nil {
 				return fmt.Errorf("git fetch: %w", err)
 			}
 			target = "FETCH_HEAD"
@@ -182,19 +223,19 @@ func buildFilebeat(ctx context.Context, logger *log.Logger, repoRoot string, key
 			return err
 		}
 		defer func() {
-			if _, err := runOutput(context.WithoutCancel(ctx), repoRoot, nil,
+			if _, err := runOutput(context.WithoutCancel(ctx), repoRoot, gitEnv,
 				"git", "-C", repoRoot, "worktree", "remove", "--force", dir); err != nil {
 				_ = os.RemoveAll(dir)
 			}
 		}()
-		if err := runStreaming(ctx, repoRoot, nil, "git", "-C", repoRoot, "worktree", "add", "--quiet", "--detach", dir, target); err != nil {
+		if err := runStreaming(ctx, repoRoot, gitEnv, "git", "-C", repoRoot, "worktree", "add", "--quiet", "--detach", dir, target); err != nil {
 			return fmt.Errorf("git worktree add: %w", err)
 		}
 		src = dir
 	}
 
 	logger.Printf("building filebeat from %s (%s) for linux/%s", src, label, key.Arch)
-	hash, err := runOutput(ctx, src, nil, "git", "-C", src, "rev-parse", "HEAD")
+	hash, err := runOutput(ctx, src, gitEnv, "git", "-C", src, "rev-parse", "HEAD")
 	if err != nil {
 		return err
 	}
@@ -203,6 +244,6 @@ func buildFilebeat(ctx context.Context, logger *log.Logger, repoRoot string, key
 	ldflags := fmt.Sprintf("-X github.com/elastic/beats/v7/libbeat/version.vcsRevision=%[1]s "+
 		"-X github.com/elastic/beats/v7/libbeat/version.commit=%[1]s "+
 		"-X github.com/elastic/beats/v7/libbeat/version.buildTime=%[2]s", hash, buildTime)
-	return runStreaming(ctx, filepath.Join(src, "filebeat"), goBuildEnv(key.Arch, true),
+	return runStreaming(ctx, filepath.Join(src, "filebeat"), gitEnv,
 		"go", "build", "-ldflags", ldflags, "-o", out, ".")
 }

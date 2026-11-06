@@ -47,8 +47,8 @@ const (
 	defaultConfigFile       = "benchmarks.yml"
 	defaultSSHPublicKeyFile = "~/.ssh/id_rsa.pub"
 	stateFileName           = ".filestream-bench-state.json"
-	stateDirName      = ".filestream-bench"
-	stateVersion      = 1
+	stateDirName            = ".filestream-bench"
+	stateVersion            = 1
 )
 
 // usageError marks command line errors, which exit with status 2.

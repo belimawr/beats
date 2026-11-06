@@ -565,13 +565,27 @@ func TestNormalizeRepo(t *testing.T) {
 	tests := []struct{ in, want string }{
 		{"", ""},
 		{"elastic/beats", "https://github.com/elastic/beats.git"},
+		{"elastic/beats.git", "https://github.com/elastic/beats.git"},
 		{"https://example.com/x.git", "https://example.com/x.git"},
-		{"git@github.com:o/r.git", "git@github.com:o/r.git"},
+		{"git@github.com:o/r.git", "https://github.com/o/r.git"},
+		{"git@github.com:o/r", "https://github.com/o/r.git"},
+		{"ssh://git@github.com/o/r.git", "https://github.com/o/r.git"},
 		{"/srv/repo", "/srv/repo"},
 	}
 	for _, tc := range tests {
 		assert.Equal(t, tc.want, normalizeRepo(tc.in), "normalizeRepo(%q)", tc.in)
 	}
+}
+
+func TestGoBuildEnvForcesHTTPS(t *testing.T) {
+	t.Setenv("GIT_CONFIG_COUNT", "99")
+	env := goBuildEnv("amd64", true)
+	assert.NotContains(t, env, "GIT_CONFIG_COUNT=99", "existing GIT_CONFIG_* must be stripped")
+	assert.Contains(t, env, "GIT_CONFIG_COUNT=2", "transient git config count")
+	assert.Contains(t, env, "GIT_CONFIG_KEY_0=url.https://github.com/.insteadOf", "rewrite ssh://git@github.com/")
+	assert.Contains(t, env, "GIT_CONFIG_VALUE_0=ssh://git@github.com/", "rewrite ssh://git@github.com/")
+	assert.Contains(t, env, "GIT_CONFIG_KEY_1=url.https://github.com/.insteadOf", "rewrite git@github.com:")
+	assert.Contains(t, env, "GIT_CONFIG_VALUE_1=git@github.com:", "rewrite git@github.com:")
 }
 
 func TestSubcommandDispatch(t *testing.T) {
