@@ -56,6 +56,7 @@ type cliConfig struct {
 	closeOnEOF         bool
 	keepRegistry       bool
 	httpPort           int
+	compatibility      bool
 
 	steadyWait            time.Duration
 	metricsInterval       time.Duration
@@ -92,6 +93,7 @@ func parseFlags(args []string) (cliConfig, error) {
 	fs.BoolVar(&c.closeOnEOF, "close-on-eof", true, "close.reader.on_eof")
 	fs.BoolVar(&c.keepRegistry, "keep-registry", false, "keep <data-dir>/registry across runs (warm restart)")
 	fs.IntVar(&c.httpPort, "http-port", 5066, "Filebeat HTTP monitoring/pprof port")
+	fs.BoolVar(&c.compatibility, "compatibility", false, "run in Filebeat 6 compatibility mode")
 
 	fs.DurationVar(&c.steadyWait, "steady-wait", time.Minute, "time to keep Filebeat running after completion before SIGTERM")
 	fs.DurationVar(&c.metricsInterval, "metrics-interval", 2*time.Second, "telemetry polling interval")
@@ -244,6 +246,7 @@ func run(ctx context.Context, logger *log.Logger, c cliConfig) error {
 		CloseOnEOF:            c.closeOnEOF,
 		KeepRegistry:          c.keepRegistry,
 		HTTPPort:              c.httpPort,
+		Compatibility:         c.compatibility,
 		Files:                 manifest.TotalFiles,
 		ExpectedEvents:        manifest.TotalExpectedEvents,
 		SteadyWait:            c.steadyWait,

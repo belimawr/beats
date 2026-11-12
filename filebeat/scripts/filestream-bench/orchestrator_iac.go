@@ -226,6 +226,7 @@ type inventoryHost struct {
 	FilebeatBinary  string
 	FilebeatTarball string
 	FilebeatVersion string
+	FilebeatURL     string
 	SSHKeyFile      string
 }
 
@@ -248,6 +249,9 @@ func renderInventory(hosts []inventoryHost) string {
 		fmt.Fprintf(&b, "%s ansible_host=%s internal_ip=%s filestream_bench_binary_path=%s filebeat_binary_path=%s filebeat_tarball_path=%s filebeat_version=%s",
 			h.Slug, iniValue(h.IP), iniValue(h.InternalIP), iniValue(h.BenchBinary),
 			iniValue(h.FilebeatBinary), iniValue(h.FilebeatTarball), iniValue(h.FilebeatVersion))
+		if h.FilebeatURL != "" {
+			fmt.Fprintf(&b, " filebeat_url=%s", iniValue(h.FilebeatURL))
+		}
 		if h.SSHKeyFile != "" {
 			fmt.Fprintf(&b, " ansible_ssh_private_key_file=%s", iniValue(h.SSHKeyFile))
 		}
@@ -410,6 +414,7 @@ func (o *orchestrator) up(ctx context.Context) error {
 			BenchBinary:     art.FilestreamBench,
 			FilebeatTarball: b.Filebeat.Tarball,
 			FilebeatVersion: b.Filebeat.Version,
+			FilebeatURL:     b.Filebeat.URL,
 			SSHKeyFile:      st.SSHKeyFile,
 		}
 		h.FilebeatBinary = b.Filebeat.Binary

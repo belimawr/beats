@@ -43,13 +43,21 @@ defaults:
   max_duration: 0s
 
 # One VM is provisioned per benchmark and executed in parallel.
-# Exactly one Filebeat source per benchmark: version | repo+ref | local | tarball | binary.
+# Exactly one Filebeat source per benchmark: version | url | repo+ref | local | tarball | binary.
 benchmarks:
   # Released version or -SNAPSHOT, downloaded on the VM.
   - name: baseline-9.5.6
     filebeat:
       version: "9.5.6"
     output_dir: ./results/baseline-9.5.6
+
+  # Filebeat 6 from a tar.gz URL, in compatibility mode: `log` input, `console`
+  # output to /dev/null, pprof via --httpprof, extra state-event accounting.
+  - name: filebeat-6.8.23
+    filebeat:
+      url: "https://dowload.filebeat.example/downloads/beats/filebeat/filebeat-6.8.23-linux-x86_64.tar.gz"
+    compatibility: true
+    output_dir: ./results/filebeat-6.8.23
 
   # Build from a git repository at a ref (branch, tag or commit).
   - name: main-memlog

@@ -122,6 +122,65 @@ http:
 	} {
 		assert.Contains(t, alt, s, "alternate config must contain %q", s)
 	}
+
+	t.Run("compatibility", func(t *testing.T) {
+		compat, err := RenderConfig(ConfigParams{
+			RegistryPath:       "/w/data/registry",
+			Backend:            "memlog",
+			CorpusDir:          "/w/logs-corpus",
+			GrowingFingerprint: true,
+			HarvesterLimit:     1000,
+			CloseOnEOF:         true,
+			CheckInterval:      5 * time.Minute,
+			LogsPath:           "/w/runs/r1/logs",
+			HTTPPort:           5066,
+			Compatibility:      true,
+		})
+		require.NoError(t, err, "rendering compatibility config")
+
+		for _, s := range []string{
+			`filebeat.registry_file: "/w/data/registry/registry"`,
+			"- type: log",
+			`- "/w/logs-corpus/dir-*/*.log"`,
+			"close_inactive: 5m",
+			"close_eof: true",
+			"close_removed: true",
+			"scan_frequency: 5m",
+			"harvester_limit: 1000",
+			"clean_removed: true",
+			"output.console:\n  enabled: true",
+			"logging:\n  json: true",
+			"http:\n  enabled: true\n  host: 127.0.0.1\n  port: 5066",
+		} {
+			assert.Contains(
+				t,
+				compat,
+				s,
+				"compatibility config must contain %q",
+				s,
+			)
+		}
+		for _, s := range []string{
+			"filebeat.registry:",
+			"backend:",
+			"id:",
+			"file_identity.fingerprint.growing",
+			"type: filestream",
+			"output.discard:",
+			"metrics.namespaces:",
+			"pprof.enabled:",
+			"ignore_older",
+			"clean_inactive",
+		} {
+			assert.NotContains(
+				t,
+				compat,
+				s,
+				"compatibility config must not contain %q",
+				s,
+			)
+		}
+	})
 }
 
 func TestFmtDuration(t *testing.T) {
@@ -362,6 +421,56 @@ func TestInspectRegistry(t *testing.T) {
 		assert.Equal(t, "9.json", s.ActiveCheckpoint, "highest txid used without active.dat")
 	})
 
+	t.Run("v6 registry layout", func(t *testing.T) {
+		root := t.TempDir()
+		write := func(name string, n int) {
+			require.NoError(
+				t,
+				os.WriteFile(
+					filepath.Join(root, name),
+					make([]byte, n),
+					0o600,
+				),
+				"write %s",
+				name,
+			)
+		}
+		write("registry", 700)
+		write("registry.new", 33)
+
+		s, err := inspectRegistry(root)
+		require.NoError(t, err, "inspect v6 registry")
+		assert.True(t, s.Exists, "registry exists")
+		assert.Equal(
+			t,
+			"registry",
+			s.ActiveCheckpoint,
+			"v6 registry file is the active checkpoint",
+		)
+		assert.Equal(
+			t,
+			int64(700),
+			s.ActiveCheckpointBytes,
+			"registry size",
+		)
+		assert.True(t, s.CheckpointNew, "registry.new present")
+		assert.Equal(
+			t,
+			int64(33),
+			s.CheckpointNewBytes,
+			"registry.new size",
+		)
+		assert.Equal(
+			t,
+			int64(0),
+			s.StorageDBBytes,
+			"v6 files are not storage db files",
+		)
+		assert.Equal(t, int64(0), s.LogJSONBytes, "no memlog files")
+		assert.Equal(t, 2, s.Files, "file count")
+		assert.Equal(t, int64(733), s.TotalBytes, "total bytes")
+	})
+
 	t.Run("otel file storage", func(t *testing.T) {
 		root := t.TempDir()
 		require.NoError(t, os.WriteFile(filepath.Join(root, "receiver_filebeat_filebeat"), make([]byte, 4096), 0o600), "write db")
@@ -425,6 +534,155 @@ func TestCompletionDetector(t *testing.T) {
 		assert.False(t, d.Observe(s, busy), "tick 2 busy")
 		assert.False(t, d.Observe(s, busy), "tick 3 busy must not complete")
 		assert.True(t, d.Observe(s, &InputsSnapshot{}), "completes once inputs are idle")
+	})
+
+	t.Run("compatibility fresh", func(t *testing.T) {
+		d := newCompletionDetector(RunOptions{
+			Files:          10,
+			ExpectedEvents: 100,
+			Compatibility:  true,
+		})
+		assert.False(
+			t,
+			d.Observe(
+				&StatsSnapshot{OutputEventsAcked: 100, EventsDone: 100},
+				nil,
+			),
+			"state events (2 per file) not yet done",
+		)
+		assert.False(
+			t,
+			d.Observe(
+				&StatsSnapshot{OutputEventsAcked: 100, EventsDone: 119},
+				nil,
+			),
+			"one state event short",
+		)
+		done := StatsSnapshot{OutputEventsAcked: 100, EventsDone: 120}
+		assert.True(
+			t,
+			d.Observe(&done, nil),
+			"events.done == expected + 2*files completes",
+		)
+		assert.True(
+			t,
+			d.Observe(&done, &InputsSnapshot{}),
+			"completes with idle inputs",
+		)
+
+		for name, mutate := range map[string]func(*StatsSnapshot){
+			"acked short":       func(s *StatsSnapshot) { s.OutputEventsAcked = 99 },
+			"events active":     func(s *StatsSnapshot) { s.EventsActive = 1 },
+			"harvester running": func(s *StatsSnapshot) { s.HarvesterRunning = 1 },
+		} {
+			s := done
+			mutate(&s)
+			assert.False(
+				t,
+				d.Observe(&s, nil),
+				"must not complete when %s",
+				name,
+			)
+		}
+	})
+
+	t.Run("compatibility warm closed harvesters", func(t *testing.T) {
+		d := newCompletionDetector(RunOptions{
+			Files:         10,
+			KeepRegistry:  true,
+			Compatibility: true,
+		})
+		assert.False(
+			t,
+			d.Observe(&StatsSnapshot{EventsDone: 9, HarvesterClosed: 10}, nil),
+			"events.done short of files",
+		)
+		assert.False(
+			t,
+			d.Observe(
+				&StatsSnapshot{
+					EventsDone:       10,
+					HarvesterClosed:  10,
+					HarvesterRunning: 1,
+				},
+				nil,
+			),
+			"harvester running",
+		)
+		assert.False(
+			t,
+			d.Observe(
+				&StatsSnapshot{
+					EventsDone:       10,
+					HarvesterStarted: 10,
+					HarvesterClosed:  9,
+				},
+				nil,
+			),
+			"closed short",
+		)
+		// FilesUnique stays 0 on Filebeat 6 and must not matter.
+		closed := &StatsSnapshot{
+			EventsDone:       10,
+			HarvesterStarted: 10,
+			HarvesterClosed:  10,
+		}
+		assert.False(
+			t,
+			d.Observe(closed, &InputsSnapshot{HarvesterWaiting: 1}),
+			"waiting harvesters",
+		)
+		assert.True(
+			t,
+			d.Observe(closed, nil),
+			"completes immediately once all harvesters closed",
+		)
+	})
+
+	t.Run("compatibility warm without harvesters", func(t *testing.T) {
+		d := newCompletionDetector(RunOptions{
+			Files:         10,
+			KeepRegistry:  true,
+			Compatibility: true,
+		})
+		s := &StatsSnapshot{EventsDone: 10}
+		assert.False(t, d.Observe(s, nil), "tick 1")
+		assert.False(t, d.Observe(s, nil), "tick 2")
+		assert.True(
+			t,
+			d.Observe(s, nil),
+			"tick %d completes",
+			warmStartedTicks,
+		)
+
+		d = newCompletionDetector(RunOptions{
+			Files:         10,
+			KeepRegistry:  true,
+			Compatibility: true,
+		})
+		assert.False(t, d.Observe(s, nil), "tick 1")
+		assert.False(t, d.Observe(s, nil), "tick 2")
+		assert.False(
+			t,
+			d.Observe(&StatsSnapshot{EventsDone: 9}, nil),
+			"events.done drop resets the ticks",
+		)
+		assert.False(t, d.Observe(s, nil), "tick 1 after reset")
+
+		d = newCompletionDetector(RunOptions{
+			Files:         10,
+			KeepRegistry:  true,
+			Compatibility: true,
+		})
+		started := &StatsSnapshot{EventsDone: 10, HarvesterStarted: 1}
+		for i := range 5 {
+			assert.False(
+				t,
+				d.Observe(started, nil),
+				"started harvesters never complete by ticks (tick %d)",
+				i+1,
+			)
+		}
 	})
 }
 
@@ -520,6 +778,71 @@ func TestTelemetryCollect(t *testing.T) {
 	assert.False(t, s.HTTPOK, "closed server must not be reachable")
 	assert.Nil(t, s.Stats, "no stats from closed server")
 	assert.NotEmpty(t, s.Errors, "errors recorded for closed server")
+}
+
+func TestTelemetryCollectCompatibility(t *testing.T) {
+	var inputsCalls, statsPprofCalls, heapCalls, indexCalls atomic.Int32
+	statsMux := http.NewServeMux()
+	statsMux.HandleFunc("/stats", func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprint(w, statsJSON)
+	})
+	statsMux.HandleFunc("/inputs/", func(w http.ResponseWriter, _ *http.Request) {
+		inputsCalls.Add(1)
+		http.NotFound(w, nil)
+	})
+	statsMux.HandleFunc("/debug/pprof/", func(http.ResponseWriter, *http.Request) {
+		statsPprofCalls.Add(1)
+	})
+	statsSrv := httptest.NewServer(statsMux)
+	defer statsSrv.Close()
+
+	pprofMux := http.NewServeMux()
+	pprofMux.HandleFunc("/debug/pprof/", func(w http.ResponseWriter, _ *http.Request) {
+		indexCalls.Add(1)
+		fmt.Fprint(w, "index")
+	})
+	pprofMux.HandleFunc("/debug/pprof/heap", func(w http.ResponseWriter, r *http.Request) {
+		heapCalls.Add(1)
+		assert.Equal(t, "1", r.URL.Query().Get("debug"), "telemetry must request debug=1")
+		fmt.Fprint(w, heapDebug1)
+	})
+	pprofSrv := httptest.NewServer(pprofMux)
+	defer pprofSrv.Close()
+
+	port := func(srv *httptest.Server) int {
+		u, err := url.Parse(srv.URL)
+		require.NoError(t, err, "parse server URL")
+		p, err := strconv.Atoi(u.Port())
+		require.NoError(t, err, "parse server port")
+		return p
+	}
+
+	tel := newTelemetry(port(statsSrv), os.Getpid(), t.TempDir())
+	tel.compat = true
+	tel.pprofBase = pprofSrv.URL
+
+	s := tel.collect(t.Context())
+	assert.True(t, s.HTTPOK, "HTTP must be reachable; errors: %v", s.Errors)
+	require.NotNil(t, s.Stats, "stats collected")
+	assert.Equal(t, int64(990), s.Stats.OutputEventsAcked, "acked from /stats")
+	assert.Nil(t, s.Inputs, "Filebeat 6 has no /inputs/")
+	assert.Empty(t, s.Errors, "a missing /inputs/ must not be reported")
+	assert.Zero(t, inputsCalls.Load(), "/inputs/ must not be requested")
+
+	ms, err := tel.memStats(t.Context())
+	require.NoError(t, err, "memstats from the pprof server")
+	assert.Equal(t, uint64(2097152), ms.HeapInuse, "HeapInuse from heap?debug=1")
+	assert.Equal(t, int32(1), heapCalls.Load(), "heap fetched from pprofBase")
+	assert.Zero(t, statsPprofCalls.Load(), "pprof must not be fetched from /stats server")
+
+	assert.True(t, tel.pprofReachable(t.Context()), "pprof server reachable")
+	assert.Equal(t, int32(1), indexCalls.Load(), "pprof index fetched from pprofBase")
+	assert.Zero(t, statsPprofCalls.Load(), "reachability must not use the /stats server")
+
+	pprofSrv.Close()
+	assert.False(t, tel.pprofReachable(t.Context()), "closed pprof server")
+	s = tel.collect(t.Context())
+	assert.True(t, s.HTTPOK, "stats server is independent of the pprof server")
 }
 
 func TestParseFilebeatVersion(t *testing.T) {
@@ -619,6 +942,12 @@ func TestReadFilebeatVersion(t *testing.T) {
 func TestProgressPercent(t *testing.T) {
 	fresh := RunOptions{ExpectedEvents: 25_500_000, Files: 500_000}
 	warm := RunOptions{ExpectedEvents: 25_500_000, Files: 500_000, KeepRegistry: true}
+	warmCompat := RunOptions{
+		ExpectedEvents: 25_500_000,
+		Files:          500_000,
+		KeepRegistry:   true,
+		Compatibility:  true,
+	}
 	tests := []struct {
 		name string
 		o    RunOptions
@@ -633,6 +962,33 @@ func TestProgressPercent(t *testing.T) {
 		{name: "fresh without expected events", o: RunOptions{Files: 10}, st: &StatsSnapshot{OutputEventsAcked: 5, HarvesterClosed: 5}, want: 0},
 		{name: "warm without files", o: RunOptions{KeepRegistry: true}, st: &StatsSnapshot{HarvesterClosed: 5}, want: 0},
 		{name: "nil stats", o: fresh, want: 0},
+		{
+			name: "warm compatibility without closed uses events done/files",
+			o:    warmCompat,
+			st:   &StatsSnapshot{EventsDone: 125_000},
+			want: 25,
+		},
+		{
+			name: "warm compatibility with closed uses closed/files",
+			o:    warmCompat,
+			st:   &StatsSnapshot{EventsDone: 500_000, HarvesterClosed: 50_000},
+			want: 10,
+		},
+		{
+			name: "warm compatibility with acks uses acked",
+			o:    warmCompat,
+			st: &StatsSnapshot{
+				OutputEventsAcked: 2_550_000,
+				EventsDone:        400_000,
+			},
+			want: 10,
+		},
+		{
+			name: "warm without compatibility ignores events done",
+			o:    warm,
+			st:   &StatsSnapshot{EventsDone: 125_000},
+			want: 0,
+		},
 	}
 	for _, tc := range tests {
 		assert.InDelta(t, tc.want, progressPercent(tc.o, tc.st), 1e-6, "progressPercent: %s", tc.name)

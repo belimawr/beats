@@ -5,8 +5,9 @@ bench_home: /opt/filestream-bench
 bench_work_dir: /var/lib/filestream-bench
 filebeat_home: /opt/filestream-bench/filebeat
 
-# Filebeat source, in precedence order: binary_path, tarball_path, version.
+# Filebeat source, in precedence order: binary_path, tarball_path, url, version.
 filebeat_version: ""
+filebeat_url: ""
 filebeat_tarball_path: ""
 filebeat_binary_path: ""
 filestream_bench_binary_path: ""

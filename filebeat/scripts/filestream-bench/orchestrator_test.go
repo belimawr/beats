@@ -220,6 +220,62 @@ benchmarks:
 			wantErr: "exactly one filebeat source",
 		},
 		{
+			name: "url and version",
+			yml: gcpHeader + `
+benchmarks:
+  - {name: a, filebeat: {version: "1", url: "https://x/fb.tar.gz"}, output_dir: /o}
+`,
+			wantErr: "exactly one filebeat source",
+		},
+		{
+			name: "url and local",
+			yml: gcpHeader + `
+benchmarks:
+  - {name: a, filebeat: {local: true, url: "https://x/fb.tar.gz"}, output_dir: /o}
+`,
+			wantErr: "exactly one filebeat source",
+		},
+		{
+			name: "url and tarball",
+			yml: gcpHeader + `
+benchmarks:
+  - {name: a, filebeat: {tarball: /t/fb.tar.gz, url: "https://x/fb.tar.gz"}, output_dir: /o}
+`,
+			wantErr: "exactly one filebeat source",
+		},
+		{
+			name: "url and ref",
+			yml: gcpHeader + `
+benchmarks:
+  - {name: a, filebeat: {ref: main, url: "https://x/fb.tar.gz"}, output_dir: /o}
+`,
+			wantErr: "exactly one filebeat source",
+		},
+		{
+			name: "url with ftp scheme",
+			yml: gcpHeader + `
+benchmarks:
+  - {name: a, filebeat: {url: "ftp://x/fb.tar.gz"}, output_dir: /o}
+`,
+			wantErr: "filebeat.url must be an http:// or https:// URL",
+		},
+		{
+			name: "url without scheme",
+			yml: gcpHeader + `
+benchmarks:
+  - {name: a, filebeat: {url: "artifacts.elastic.co/fb.tar.gz"}, output_dir: /o}
+`,
+			wantErr: "filebeat.url must be an http:// or https:// URL",
+		},
+		{
+			name: "invalid compatibility value",
+			yml: gcpHeader + `
+benchmarks:
+  - {name: a, filebeat: {version: "1"}, output_dir: /o, compatibility: maybe}
+`,
+			wantErr: "cannot unmarshal !!str `maybe` into bool",
+		},
+		{
 			name: "invalid backend",
 			yml: gcpHeader + `
 benchmarks:
@@ -261,14 +317,29 @@ func TestBenchOverridesMatchParams(t *testing.T) {
 
 	one := 1
 	d := time.Second
+	compat := true
 	o = benchOverrides{
 		Files: &one, Dirs: &one, FileSize: &one, BytesPerLine: &one, HarvesterLimit: &one,
 		CheckInterval: &d, SteadyWait: &d, MetricsInterval: &d, FastWindow: &d,
 		InitialProfileDelay: &d, FastProfileInterval: &d, SteadyProfileInterval: &d,
 		CPUProfileDuration: &d, MaxDuration: &d, ReadyTimeout: &d, ShutdownTimeout: &d,
+		Compatibility: &compat,
 	}
 	require.NotPanics(t, func() { p.apply(o) }, "all fields set")
 	assert.Equal(t, d, p.ShutdownTimeout, "last duration field applied")
+	assert.True(t, p.Compatibility, "compatibility override applied")
+
+	off := false
+	require.NotPanics(
+		t,
+		func() { p.apply(benchOverrides{Compatibility: &off}) },
+		"explicit compatibility=false",
+	)
+	assert.False(t, p.Compatibility, "explicit false must clear compatibility")
+
+	p.Compatibility = true
+	require.NotPanics(t, func() { p.apply(benchOverrides{}) }, "no overrides")
+	assert.True(t, p.Compatibility, "unset compatibility keeps the value")
 }
 
 func TestSanitizeSlug(t *testing.T) {
@@ -327,13 +398,30 @@ func TestRenderInventory(t *testing.T) {
 		{
 			Slug: "c-three", IP: "10.0.0.3", BenchBinary: "/b", FilebeatVersion: "9.5.6",
 		},
+		{
+			Slug: "d-four", IP: "10.0.0.4", BenchBinary: "/b",
+			FilebeatURL: "https://artifacts.elastic.co/downloads/beats/filebeat/filebeat-6.8.23-linux-x86_64.tar.gz",
+			SSHKeyFile:  "/home/u/.ssh/id",
+		},
+		{
+			Slug: "e-five", IP: "10.0.0.5", BenchBinary: "/b",
+			FilebeatURL: "https://x/fb 6.tar.gz?a=1&b='2'",
+		},
 	})
 	want := `[bench]
 a-one ansible_host=10.0.0.1 internal_ip=192.168.0.1 filestream_bench_binary_path=/tmp/b/filestream-bench filebeat_binary_path=/tmp/b/filebeat-0 filebeat_tarball_path="" filebeat_version="" ansible_ssh_private_key_file=/home/u/.ssh/id
 b-two ansible_host=10.0.0.2 internal_ip=192.168.0.2 filestream_bench_binary_path="/tmp/build dir/filestream-bench" filebeat_binary_path="" filebeat_tarball_path=/t/fb.tar.gz filebeat_version=""
 c-three ansible_host=10.0.0.3 internal_ip="" filestream_bench_binary_path=/b filebeat_binary_path="" filebeat_tarball_path="" filebeat_version=9.5.6
+d-four ansible_host=10.0.0.4 internal_ip="" filestream_bench_binary_path=/b filebeat_binary_path="" filebeat_tarball_path="" filebeat_version="" filebeat_url=https://artifacts.elastic.co/downloads/beats/filebeat/filebeat-6.8.23-linux-x86_64.tar.gz ansible_ssh_private_key_file=/home/u/.ssh/id
+e-five ansible_host=10.0.0.5 internal_ip="" filestream_bench_binary_path=/b filebeat_binary_path="" filebeat_tarball_path="" filebeat_version="" filebeat_url="https://x/fb 6.tar.gz?a=1&b='2'"
 `
 	assert.Equal(t, want, got, "inventory")
+	assert.Equal(
+		t,
+		2,
+		strings.Count(got, "filebeat_url="),
+		"filebeat_url must be emitted only for hosts with a URL source",
+	)
 }
 
 func TestRemoteCommandFlags(t *testing.T) {
@@ -360,6 +448,121 @@ func TestRemoteCommandFlags(t *testing.T) {
 	// Every duration must round-trip through the real flag parser.
 	_, err := parseFlags(p.remoteArgs())
 	assert.NoError(t, err, "remote args must be accepted by parseFlags")
+	assert.NotContains(
+		t,
+		got,
+		"--compatibility",
+		"the flag is omitted unless compatibility is enabled",
+	)
+
+	p.Compatibility = true
+	got = p.remoteCommand()
+	assert.True(
+		t,
+		strings.HasSuffix(got, " --shutdown-timeout 0s --compatibility=true"),
+		"compatibility flag is appended last: %s",
+		got,
+	)
+	c, err := parseFlags(p.remoteArgs())
+	require.NoError(t, err, "compatibility args must be accepted by parseFlags")
+	assert.True(t, c.compatibility, "--compatibility=true parsed by parseFlags")
+}
+
+func TestParseConfigCompatibilityAndURL(t *testing.T) {
+	const fb6 = "https://artifacts.elastic.co/downloads/beats/filebeat/" +
+		"filebeat-6.8.23-linux-x86_64.tar.gz"
+	cfg, err := parseTestConfig(t, gcpHeader+`
+defaults:
+  compatibility: true
+benchmarks:
+  - name: fb6
+    filebeat:
+      url: "`+fb6+`"
+    output_dir: /o/fb6
+  - name: fb6-explicit
+    filebeat: {url: "http://mirror.local/fb.tar.gz"}
+    output_dir: /o/fb6-explicit
+    compatibility: true
+  - name: modern
+    filebeat: {version: "9.5.6"}
+    output_dir: /o/modern
+    compatibility: false
+`, "/base")
+	require.NoError(t, err, "parsing config")
+	require.Len(t, cfg.Resolved, 3, "resolved benchmarks")
+
+	fb6b, explicit, modern := cfg.Resolved[0], cfg.Resolved[1], cfg.Resolved[2]
+	assert.Equal(t, fb6, fb6b.Filebeat.URL, "filebeat.url kept verbatim")
+	assert.Equal(t, 1, fb6b.Filebeat.sourceCount(), "url is the only source")
+	assert.True(
+		t,
+		fb6b.Params.Compatibility,
+		"compatibility inherited from defaults",
+	)
+	assert.True(
+		t,
+		explicit.Params.Compatibility,
+		"explicit compatibility: true",
+	)
+	assert.Equal(
+		t,
+		"http://mirror.local/fb.tar.gz",
+		explicit.Filebeat.URL,
+		"http:// URLs are accepted",
+	)
+	assert.False(
+		t,
+		modern.Params.Compatibility,
+		"explicit false must override a true default",
+	)
+	assert.Empty(t, modern.Filebeat.URL, "no URL for a version source")
+	assert.Contains(
+		t,
+		fb6b.Params.remoteCommand(),
+		"--compatibility=true",
+		"remote command of a compatibility benchmark",
+	)
+	assert.NotContains(
+		t,
+		modern.Params.remoteCommand(),
+		"--compatibility",
+		"remote command of a regular benchmark",
+	)
+
+	// Without defaults the zero value applies.
+	cfg, err = parseTestConfig(t, gcpHeader+`
+benchmarks:
+  - name: a
+    filebeat: {url: "`+fb6+`"}
+    output_dir: /o/a
+`, "/base")
+	require.NoError(t, err, "parsing config without defaults")
+	assert.False(
+		t,
+		cfg.Resolved[0].Params.Compatibility,
+		"compatibility is off by default",
+	)
+}
+
+func TestExampleConfigCompatibilityBenchmark(t *testing.T) {
+	cfg, err := loadOrchestratorConfig("benchmarks.example.yml")
+	require.NoError(t, err, "benchmarks.example.yml must be valid")
+	var compat int
+	for _, b := range cfg.Resolved {
+		if !b.Params.Compatibility {
+			continue
+		}
+		compat++
+		assert.Equal(t, "filebeat-6.8.23", b.Name, "compatibility benchmark")
+		assert.Equal(
+			t,
+			"https://artifacts.elastic.co/downloads/beats/filebeat/"+
+				"filebeat-6.8.23-linux-x86_64.tar.gz",
+			b.Filebeat.URL,
+			"compatibility benchmark downloads Filebeat 6 from a URL",
+		)
+	}
+	assert.Equal(t, 1, compat, "exactly one compatibility benchmark")
 }
 
 func TestLaunchScript(t *testing.T) {
@@ -387,7 +590,7 @@ func TestExampleConfigParses(t *testing.T) {
 	cfg, err := loadOrchestratorConfig("benchmarks.example.yml")
 	require.NoError(t, err, "benchmarks.example.yml must be valid")
 	assert.Equal(t, providerGCP, cfg.Provider, "example provider")
-	assert.Len(t, cfg.Resolved, 4, "example benchmarks")
+	assert.Len(t, cfg.Resolved, 5, "example benchmarks")
 }
 
 func TestShellQuote(t *testing.T) {

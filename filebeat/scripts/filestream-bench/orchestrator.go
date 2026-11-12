@@ -182,6 +182,8 @@ type benchOverrides struct {
 	MaxDuration           *time.Duration `yaml:"max_duration"`
 	ReadyTimeout          *time.Duration `yaml:"ready_timeout"`
 	ShutdownTimeout       *time.Duration `yaml:"shutdown_timeout"`
+
+	Compatibility *bool `yaml:"compatibility"`
 }
 
 // benchParams is the fully resolved set of filestream-bench flags of one
@@ -209,6 +211,8 @@ type benchParams struct {
 	MaxDuration           time.Duration
 	ReadyTimeout          time.Duration
 	ShutdownTimeout       time.Duration
+
+	Compatibility bool
 }
 
 // defaultBenchParams mirrors the defaults of parseFlags.
@@ -291,9 +295,10 @@ func (p benchParams) validate() error {
 }
 
 // filebeatConfig selects the Filebeat under test. Exactly one source must be
-// configured: version, ref/repo, local, tarball or binary.
+// configured: version, url, ref/repo, local, tarball or binary.
 type filebeatConfig struct {
 	Version string `yaml:"version"`
+	URL     string `yaml:"url"`
 	Repo    string `yaml:"repo"`
 	Ref     string `yaml:"ref"`
 	Local   bool   `yaml:"local"`
@@ -309,6 +314,9 @@ func (f filebeatConfig) needsBuild() bool {
 func (f filebeatConfig) sourceCount() int {
 	n := 0
 	if f.Version != "" {
+		n++
+	}
+	if f.URL != "" {
 		n++
 	}
 	if f.Ref != "" || f.Repo != "" {
@@ -521,7 +529,10 @@ func (c *orchestratorConfig) resolve() error {
 
 		fb := b.Filebeat
 		if n := fb.sourceCount(); n != 1 {
-			return fmt.Errorf("benchmark %q: exactly one filebeat source (version, ref/repo, local, tarball, binary) is required, got %d", b.Name, n)
+			return fmt.Errorf("benchmark %q: exactly one filebeat source (version, url, ref/repo, local, tarball, binary) is required, got %d", b.Name, n)
+		}
+		if fb.URL != "" && !strings.HasPrefix(fb.URL, "http://") && !strings.HasPrefix(fb.URL, "https://") {
+			return fmt.Errorf("benchmark %q: filebeat.url must be an http:// or https:// URL, got %q", b.Name, fb.URL)
 		}
 		if fb.Tarball, err = expandPath(fb.Tarball, c.Dir); err != nil {
 			return fmt.Errorf("benchmark %q: %w", b.Name, err)

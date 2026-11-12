@@ -67,7 +67,7 @@ func shellQuote(s string) string {
 
 // remoteArgs returns the filestream-bench flags of a benchmark.
 func (p benchParams) remoteArgs() []string {
-	return []string{
+	args := []string{
 		"--work-dir", remoteWorkDir,
 		"--run-dir", remoteRunDir,
 		"--filebeat-bin", remoteFilebeatBin,
@@ -92,6 +92,10 @@ func (p benchParams) remoteArgs() []string {
 		"--ready-timeout", p.ReadyTimeout.String(),
 		"--shutdown-timeout", p.ShutdownTimeout.String(),
 	}
+	if p.Compatibility {
+		args = append(args, "--compatibility=true")
+	}
+	return args
 }
 
 // remoteCommand returns the shell command line that runs filestream-bench on

@@ -79,6 +79,9 @@ type RunOptions struct {
 	CloseOnEOF         bool
 	KeepRegistry       bool
 	HTTPPort           int
+	// Compatibility runs Filebeat 6.x: log input, registry_file, console
+	// output and a dedicated --httpprof listener.
+	Compatibility bool
 
 	Files          int
 	ExpectedEvents int64
@@ -112,6 +115,8 @@ type RunResult struct {
 	ExpectedEvents int64   `json:"expected_events"`
 	HTTPPort       int     `json:"http_port"`
 	SteadyWaitSec  float64 `json:"steady_wait_s"`
+	Compatibility  bool    `json:"compatibility,omitempty"`
+	PprofPort      int     `json:"pprof_port,omitempty"`
 
 	StartTime    time.Time `json:"start_time"`
 	ReadyTime    time.Time `json:"ready_time,omitzero"`
@@ -305,6 +310,7 @@ type ConfigParams struct {
 	CheckInterval      time.Duration
 	LogsPath           string
 	HTTPPort           int
+	Compatibility      bool
 }
 
 var configTemplate = template.Must(template.New("filebeat.yml").Funcs(template.FuncMap{
@@ -358,10 +364,63 @@ http:
   pprof.enabled: true
 `))
 
+// configTemplateCompat is the Filebeat 6.x equivalent of configTemplate: log
+// input, registry_file, console output (stdout is discarded by the harness)
+// and no pprof/namespaces settings, which Filebeat 6 does not know.
+var configTemplateCompat = template.Must(template.New("filebeat6.yml").Funcs(template.FuncMap{
+	"q":   yamlQuote,
+	"dur": fmtDuration,
+}).Parse(`seccomp.enabled: false
+
+filebeat.registry_file: {{q (printf "%s/registry" .RegistryPath)}}
+
+filebeat.inputs:
+  - type: log
+    enabled: true
+    paths:
+      - {{q (printf "%s/dir-*/*.log" .CorpusDir)}}
+    harvester_limit: {{.HarvesterLimit}}
+    close_inactive: 5m
+    close_eof: {{.CloseOnEOF}}
+    close_removed: true
+    scan_frequency: {{dur .CheckInterval}}
+    clean_removed: true
+
+queue.mem:
+  events: 8192
+  flush.min_events: 4096
+  flush.timeout: 1s
+
+output.console:
+  enabled: true
+
+logging:
+  json: true
+  to_syslog: false
+  to_stderr: false
+  to_files: true
+  level: info
+  metrics.period: 30s
+  files:
+    path: {{q .LogsPath}}
+    name: filebeat
+    rotateeverybytes: 104857600 # 100 MiB
+    keepfiles: 100              # Preserve all log files
+
+http:
+  enabled: true
+  host: 127.0.0.1
+  port: {{.HTTPPort}}
+`))
+
 // RenderConfig renders filebeat.yml for p.
 func RenderConfig(p ConfigParams) (string, error) {
 	var b strings.Builder
-	if err := configTemplate.Execute(&b, p); err != nil {
+	tmpl := configTemplate
+	if p.Compatibility {
+		tmpl = configTemplateCompat
+	}
+	if err := tmpl.Execute(&b, p); err != nil {
 		return "", err
 	}
 	return b.String(), nil
@@ -773,9 +832,12 @@ func inspectRegistry(dir string) (RegistryStats, error) {
 		switch {
 		case name == "log.json":
 			s.LogJSONBytes += size
-		case name == "checkpoint.new":
+		case name == "checkpoint.new", name == "registry.new":
 			s.CheckpointNew = true
 			s.CheckpointNewBytes += size
+		case name == "registry":
+			// Filebeat 6 single-file registry.
+			checkpoints[path] = ckpt{txid: 0, size: size}
 		case name == "active.dat":
 			if b, err := os.ReadFile(path); err == nil { //nolint:gosec // read-only inspection of the harness-owned registry dir
 				activeLink = strings.TrimSpace(string(b))
@@ -830,15 +892,21 @@ type Sample struct {
 // Telemetry client
 
 type telemetry struct {
-	base        string
+	base string
+	// pprofBase serves /debug/pprof; it differs from base in compatibility
+	// mode, where Filebeat 6 exposes pprof on --httpprof only.
+	pprofBase   string
+	compat      bool
 	client      *http.Client
 	pid         int
 	registryDir string
 }
 
 func newTelemetry(port, pid int, registryDir string) *telemetry {
+	base := fmt.Sprintf("http://127.0.0.1:%d", port)
 	return &telemetry{
-		base:        fmt.Sprintf("http://127.0.0.1:%d", port),
+		base:        base,
+		pprofBase:   base,
 		client:      &http.Client{},
 		pid:         pid,
 		registryDir: registryDir,
@@ -846,9 +914,18 @@ func newTelemetry(port, pid int, registryDir string) *telemetry {
 }
 
 func (t *telemetry) get(ctx context.Context, path string, timeout time.Duration) ([]byte, error) {
+	return t.getFrom(ctx, t.base, path, timeout)
+}
+
+// getPprof fetches a /debug/pprof path from pprofBase.
+func (t *telemetry) getPprof(ctx context.Context, path string, timeout time.Duration) ([]byte, error) {
+	return t.getFrom(ctx, t.pprofBase, path, timeout)
+}
+
+func (t *telemetry) getFrom(ctx context.Context, base, path string, timeout time.Duration) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, t.base+path, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+path, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -872,8 +949,18 @@ func (t *telemetry) reachable(ctx context.Context) bool {
 	return err == nil
 }
 
+// pprofReachable reports whether profiles can be fetched. In compatibility
+// mode the pprof listener is separate from the monitoring endpoint.
+func (t *telemetry) pprofReachable(ctx context.Context) bool {
+	if !t.compat {
+		return t.reachable(ctx)
+	}
+	_, err := t.getPprof(ctx, "/debug/pprof/", 2*time.Second)
+	return err == nil
+}
+
 func (t *telemetry) memStats(ctx context.Context) (MemStats, error) {
-	body, err := t.get(ctx, "/debug/pprof/heap?debug=1", httpRequestTimeout)
+	body, err := t.getPprof(ctx, "/debug/pprof/heap?debug=1", httpRequestTimeout)
 	if err != nil {
 		return MemStats{}, err
 	}
@@ -899,7 +986,8 @@ func (t *telemetry) collect(ctx context.Context) Sample {
 		s.Stats = &st
 		s.HTTPOK = true
 	}
-	if s.HTTPOK {
+	// Filebeat 6 has no /inputs/ endpoint.
+	if s.HTTPOK && !t.compat {
 		if body, err := t.get(ctx, "/inputs/", httpRequestTimeout); err != nil {
 			addErr("inputs", err)
 		} else if in, err := parseInputs(body); err != nil {
@@ -938,10 +1026,16 @@ type completionDetector struct {
 	files       int64
 	expected    int64
 	uniqueTicks int
+	compat      bool
 }
 
 func newCompletionDetector(o RunOptions) *completionDetector {
-	return &completionDetector{warm: o.KeepRegistry, files: int64(o.Files), expected: o.ExpectedEvents}
+	return &completionDetector{
+		warm:     o.KeepRegistry,
+		files:    int64(o.Files),
+		expected: o.ExpectedEvents,
+		compat:   o.Compatibility,
+	}
 }
 
 // Observe feeds one /stats snapshot and, when available, the matching /inputs/
@@ -951,13 +1045,27 @@ func (d *completionDetector) Observe(s *StatsSnapshot, in *InputsSnapshot) bool 
 	// global counters already look idle.
 	inputsIdle := in == nil || (in.HarvesterWaiting == 0 && in.HarvesterActiveReaders == 0)
 	if !d.warm {
+		// Filebeat 6 log input sends two extra state-only events per file
+		// (harvester start and close) through events.{added,done}; only log
+		// line events are counted in output.events.acked.
+		done := d.expected
+		if d.compat {
+			done += 2 * d.files
+		}
 		return inputsIdle &&
 			s.OutputEventsAcked >= d.expected &&
-			s.EventsDone >= d.expected &&
+			s.EventsDone >= done &&
 			s.EventsActive == 0 &&
 			s.HarvesterRunning == 0
 	}
-	if s.FilesUnique != d.files {
+	if d.compat {
+		// filebeat.filestream.files_unique does not exist in Filebeat 6;
+		// loadStates sends one state update event per file instead.
+		if s.EventsDone < d.files {
+			d.uniqueTicks = 0
+			return false
+		}
+	} else if s.FilesUnique != d.files {
 		d.uniqueTicks = 0
 		return false
 	}
@@ -1049,7 +1157,7 @@ func (p *profiler) capture(ctx context.Context, label string) ProfileRecord {
 	}
 
 	fetch := func(name, path string, timeout time.Duration) string {
-		body, err := p.tel.get(ctx, path, timeout)
+		body, err := p.tel.getPprof(ctx, path, timeout)
 		if err != nil {
 			rec.Errors = append(rec.Errors, name+": "+err.Error())
 			return ""
@@ -1126,7 +1234,7 @@ func (p *profiler) loop(ctx context.Context, sched ProfileSchedule, shutdownCh <
 			close(req.done)
 		case <-timer.C:
 			last = time.Now()
-			if !p.tel.reachable(ctx) {
+			if !p.tel.pprofReachable(ctx) {
 				continue
 			}
 			label := "sched"
@@ -1162,29 +1270,47 @@ type fbProcess struct {
 	stderr   *os.File
 }
 
-func startFilebeat(o RunOptions, cfgPath string) (*fbProcess, error) {
-	stdout, err := os.Create(filepath.Join(o.RunDir, "filebeat.stdout"))
-	if err != nil {
-		return nil, err
+func startFilebeat(o RunOptions, cfgPath string, pprofPort int) (*fbProcess, error) {
+	// In compatibility mode output.console writes events to stdout; a nil
+	// Stdout makes os/exec use /dev/null instead of filling the disk.
+	var stdout *os.File
+	if !o.Compatibility {
+		var err error
+		stdout, err = os.Create(filepath.Join(o.RunDir, "filebeat.stdout"))
+		if err != nil {
+			return nil, err
+		}
+	}
+	closeStdout := func() {
+		if stdout != nil {
+			_ = stdout.Close()
+		}
 	}
 	stderr, err := os.Create(filepath.Join(o.RunDir, "filebeat.stderr"))
 	if err != nil {
-		_ = stdout.Close()
+		closeStdout()
 		return nil, err
 	}
 	// No CommandContext: cancellation must lead to SIGTERM via Run, not SIGKILL.
-	cmd := exec.Command(o.FilebeatBin, //nolint:gosec,noctx // running the user-selected Filebeat binary is the purpose of the harness
+	args := []string{
 		"--strict.perms=false",
 		"-c", cfgPath,
-		"--path.home="+o.RunDir,
-		"--path.data="+o.DataDir,
-		"--path.logs="+filepath.Join(o.RunDir, "logs"),
-	)
+		"--path.home=" + o.RunDir,
+		"--path.data=" + o.DataDir,
+		"--path.logs=" + filepath.Join(o.RunDir, "logs"),
+	}
+	if o.Compatibility {
+		args = append(args, "--httpprof=127.0.0.1:"+strconv.Itoa(pprofPort))
+	}
+	cmd := exec.Command(o.FilebeatBin, args...) //nolint:gosec,noctx // running the user-selected Filebeat binary is the purpose of the harness
 	cmd.Dir = o.RunDir
-	cmd.Stdout, cmd.Stderr = stdout, stderr
+	if stdout != nil {
+		cmd.Stdout = stdout
+	}
+	cmd.Stderr = stderr
 	setProcAttr(cmd)
 	if err := cmd.Start(); err != nil {
-		_ = stdout.Close()
+		closeStdout()
 		_ = stderr.Close()
 		return nil, fmt.Errorf("start %s: %w", o.FilebeatBin, err)
 	}
@@ -1192,7 +1318,7 @@ func startFilebeat(o RunOptions, cfgPath string) (*fbProcess, error) {
 	go func() {
 		p.exitErr = cmd.Wait()
 		p.exitTime = time.Now()
-		_ = stdout.Close()
+		closeStdout()
 		_ = stderr.Close()
 		close(p.exited)
 	}()
@@ -1233,6 +1359,25 @@ func checkPortFree(ctx context.Context, port int) error {
 		return fmt.Errorf("http port %d unavailable (another Filebeat running?): %w", port, err)
 	}
 	return l.Close()
+}
+
+// pickPprofPort returns a free port for Filebeat 6 --httpprof: preferably
+// httpPort+1, otherwise an ephemeral port.
+func pickPprofPort(ctx context.Context, httpPort int) (int, error) {
+	if httpPort+1 <= 65535 && checkPortFree(ctx, httpPort+1) == nil {
+		return httpPort + 1, nil
+	}
+	var lc net.ListenConfig
+	l, err := lc.Listen(ctx, "tcp", "127.0.0.1:0")
+	if err != nil {
+		return 0, fmt.Errorf("find free pprof port: %w", err)
+	}
+	defer l.Close()
+	addr, ok := l.Addr().(*net.TCPAddr)
+	if !ok {
+		return 0, fmt.Errorf("unexpected listener address %T", l.Addr())
+	}
+	return addr.Port, nil
 }
 
 func waitReady(ctx context.Context, tel *telemetry, p *fbProcess, timeout time.Duration) error {
@@ -1319,6 +1464,9 @@ func progressPercent(o RunOptions, st *StatsSnapshot) float64 {
 		return float64(st.OutputEventsAcked) * 100 / float64(o.ExpectedEvents)
 	}
 	if o.KeepRegistry && o.Files > 0 {
+		if o.Compatibility && st.HarvesterClosed == 0 {
+			return float64(st.EventsDone) * 100 / float64(o.Files)
+		}
 		return float64(st.HarvesterClosed) * 100 / float64(o.Files)
 	}
 	return 0
@@ -1334,6 +1482,7 @@ func Run(ctx context.Context, logger *log.Logger, o RunOptions) (res RunResult, 
 		ExpectedEvents: o.ExpectedEvents,
 		HTTPPort:       o.HTTPPort,
 		SteadyWaitSec:  o.SteadyWait.Seconds(),
+		Compatibility:  o.Compatibility,
 	}
 	defer func() {
 		if err != nil {
@@ -1349,6 +1498,15 @@ func Run(ctx context.Context, logger *log.Logger, o RunOptions) (res RunResult, 
 	}
 	if err := checkPortFree(ctx, o.HTTPPort); err != nil {
 		return res, err
+	}
+	var pprofPort int
+	if o.Compatibility {
+		p, err := pickPprofPort(ctx, o.HTTPPort)
+		if err != nil {
+			return res, err
+		}
+		pprofPort = p
+		res.PprofPort = p
 	}
 	// Concurrent and detached from ctx: it must neither delay Filebeat's start
 	// nor be lost when the run is interrupted. Joined before run.json is written.
@@ -1376,6 +1534,7 @@ func Run(ctx context.Context, logger *log.Logger, o RunOptions) (res RunResult, 
 		CheckInterval:      o.CheckInterval,
 		LogsPath:           filepath.Join(o.RunDir, "logs"),
 		HTTPPort:           o.HTTPPort,
+		Compatibility:      o.Compatibility,
 	})
 	if err != nil {
 		return res, err
@@ -1396,7 +1555,7 @@ func Run(ctx context.Context, logger *log.Logger, o RunOptions) (res RunResult, 
 	}
 	defer profilesFile.Close()
 
-	proc, err := startFilebeat(o, cfgPath)
+	proc, err := startFilebeat(o, cfgPath, pprofPort)
 	if err != nil {
 		return res, err
 	}
@@ -1409,6 +1568,10 @@ func Run(ctx context.Context, logger *log.Logger, o RunOptions) (res RunResult, 
 	defer cancelLoops()
 
 	tel := newTelemetry(o.HTTPPort, res.PID, o.RegistryDir)
+	if o.Compatibility {
+		tel.pprofBase = fmt.Sprintf("http://127.0.0.1:%d", pprofPort)
+		tel.compat = true
+	}
 	phase := newPhaseTracker(phaseStarting)
 	latest := make(chan Sample, 1)
 	var wg sync.WaitGroup

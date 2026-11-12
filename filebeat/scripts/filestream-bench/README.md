@@ -248,11 +248,19 @@ benchmarks:
   `growing_fingerprint`, `harvester_limit`, `check_interval`, `close_on_eof`,
   `keep_registry`, `steady_wait`, `metrics_interval`, `fast_window`,
   `initial_profile_delay`, `fast_profile_interval`, `steady_profile_interval`,
-  `cpu_profile_duration`, `max_duration`, `ready_timeout`, `shutdown_timeout`.
+  `cpu_profile_duration`, `max_duration`, `ready_timeout`, `shutdown_timeout`,
+  `compatibility`.
   Precedence: benchmark, `defaults`, single-host flag default. Explicit `false`
   and `0s` override a non-zero default.
-- Exactly one Filebeat source per benchmark: `version`, `ref`/`repo`,
-  `local: true` (working tree), `tarball` or `binary`. Local/ref/repo builds are
+- `compatibility: true` (single-host flag `--compatibility`) benchmarks Filebeat
+  6.x: `log` input, `console` output redirected to `/dev/null`, pprof collected
+  via `--httpprof` instead of the monitoring HTTP endpoint, and extra
+  accounting of registry state events. Pair it with a Filebeat 6 `url`,
+  `tarball` or `binary` source.
+- Exactly one Filebeat source per benchmark: `version`, `url`, `ref`/`repo`,
+  `local: true` (working tree), `tarball` or `binary`. `url` is an `http(s)://`
+  link to a Filebeat `tar.gz` downloaded on the VM, e.g.
+  `filebeat: {url: "https://artifacts.elastic.co/downloads/beats/filebeat/filebeat-6.8.23-linux-x86_64.tar.gz"}`. Local/ref/repo builds are
   shared by benchmarks with the same source and are built with the
   `libbeat/version` ldflags used by `run.sh`.
 - Names must be unique and map to unique VM slugs (`[a-z0-9-]+`); `output_dir`s

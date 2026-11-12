@@ -47,11 +47,13 @@ const (
 const (
 	msgBeatStart      = "filebeat start running."
 	msgRegistryLoaded = "Finished loading transaction log file"
-	msgRegistryMigr   = "Migrate registry"
-	msgLoadingInputs  = "Loading Inputs:"
-	msgInputsStarted  = "Loading and starting Inputs completed"
-	msgStopping       = "Stopping filebeat"
-	msgBeatStopped    = "filebeat stopped."
+	// msgRegistryLoadedV6 is logged by the Filebeat 6 registrar.
+	msgRegistryLoadedV6 = "States Loaded from registrar:"
+	msgRegistryMigr     = "Migrate registry"
+	msgLoadingInputs    = "Loading Inputs:"
+	msgInputsStarted    = "Loading and starting Inputs completed"
+	msgStopping         = "Stopping filebeat"
+	msgBeatStopped      = "filebeat stopped."
 )
 
 // LogMarkers holds the earliest timestamp of each marker message found in
@@ -80,10 +82,13 @@ const (
 )
 
 type logLine struct {
-	Level      string `json:"log.level"`
-	Timestamp  string `json:"@timestamp"`
-	Message    string `json:"message"`
-	SystemInfo *struct {
+	Level     string `json:"log.level"`
+	Timestamp string `json:"@timestamp"`
+	Message   string `json:"message"`
+	// Filebeat 6 JSON logs use "level" and "timestamp".
+	LegacyLevel     string `json:"level"`
+	LegacyTimestamp string `json:"timestamp"`
+	SystemInfo      *struct {
 		Build *struct {
 			Commit  string `json:"commit"`
 			Libbeat string `json:"libbeat"`
@@ -95,6 +100,22 @@ type logLine struct {
 			Version string `json:"version"`
 		} `json:"go"`
 	} `json:"system_info"`
+}
+
+// level returns the log level of either Filebeat generation.
+func (l logLine) level() string {
+	if l.Level != "" {
+		return l.Level
+	}
+	return l.LegacyLevel
+}
+
+// timestamp returns the log timestamp of either Filebeat generation.
+func (l logLine) timestamp() string {
+	if l.Timestamp != "" {
+		return l.Timestamp
+	}
+	return l.LegacyTimestamp
 }
 
 // applyBuildLog merges a "Build info" / "Go runtime info" line into m.Build.
@@ -144,12 +165,27 @@ func parseLogTime(s string) (time.Time, error) {
 	return time.Time{}, firstErr
 }
 
-// parseLogs scans all files matching ${RUN_DIR}/logs/filebeat*.ndjson.
+// parseLogs scans all files matching ${RUN_DIR}/logs/filebeat*.ndjson and,
+// for Filebeat 6, the ${RUN_DIR}/logs/filebeat and filebeat.<N> files.
 func parseLogs(logsDir string) (LogMarkers, error) {
 	var m LogMarkers
-	files, err := filepath.Glob(filepath.Join(logsDir, "filebeat*.ndjson"))
-	if err != nil {
-		return m, err
+	var files []string
+	seen := map[string]struct{}{}
+	for _, pattern := range []string{"filebeat*.ndjson", "filebeat", "filebeat.[0-9]*"} {
+		matches, err := filepath.Glob(filepath.Join(logsDir, pattern))
+		if err != nil {
+			return m, err
+		}
+		for _, path := range matches {
+			if _, ok := seen[path]; ok {
+				continue
+			}
+			if st, err := os.Stat(path); err != nil || st.IsDir() {
+				continue
+			}
+			seen[path] = struct{}{}
+			files = append(files, path)
+		}
 	}
 	m.LogFiles = len(files)
 	for _, path := range files {
@@ -176,7 +212,9 @@ func scanLogs(r io.Reader, m *LogMarkers) error {
 	}{
 		{func(s string) bool { return strings.HasPrefix(s, msgBeatStart) }, &m.BeatStart},
 		{func(s string) bool { return strings.Contains(s, msgRegistryMigr) }, &m.RegistryMigration},
-		{func(s string) bool { return strings.HasPrefix(s, msgRegistryLoaded) }, &m.RegistryLoaded},
+		{func(s string) bool {
+			return strings.HasPrefix(s, msgRegistryLoaded) || strings.HasPrefix(s, msgRegistryLoadedV6)
+		}, &m.RegistryLoaded},
 		{func(s string) bool { return strings.HasPrefix(s, msgLoadingInputs) }, &m.LoadingInputs},
 		{func(s string) bool { return strings.HasPrefix(s, msgInputsStarted) }, &m.InputsStarted},
 		{func(s string) bool { return strings.HasPrefix(s, msgStopping) }, &m.Stopping},
@@ -190,7 +228,7 @@ func scanLogs(r io.Reader, m *LogMarkers) error {
 			continue
 		}
 		m.Lines++
-		switch l.Level {
+		switch l.level() {
 		case "error":
 			m.Errors++
 		case "warn":
@@ -201,7 +239,7 @@ func scanLogs(r io.Reader, m *LogMarkers) error {
 			if !mk.match(l.Message) {
 				continue
 			}
-			ts, err := parseLogTime(l.Timestamp)
+			ts, err := parseLogTime(l.timestamp())
 			if err != nil {
 				continue
 			}
@@ -304,7 +342,8 @@ var metricDefs = []metricDef{
 		switch {
 		case s.MemStats != nil:
 			return float64(s.MemStats.HeapSys), true
-		case s.Stats != nil:
+		case s.Stats != nil && s.Stats.MemorySys > 0:
+			// Filebeat 6 /stats has no memory_sys.
 			return float64(s.Stats.MemorySys), true
 		}
 		return 0, false
@@ -358,7 +397,8 @@ var metricDefs = []metricDef{
 		return *s.CPUPercent, true
 	}},
 	{"goroutines", false, func(s Sample) (float64, bool) {
-		if s.Stats == nil {
+		// Filebeat 6 /stats has no beat.runtime.goroutines.
+		if s.Stats == nil || s.Stats.Goroutines <= 0 {
 			return 0, false
 		}
 		return float64(s.Stats.Goroutines), true
@@ -741,6 +781,10 @@ func BuildReport(ctx context.Context, logger *log.Logger, runDir, goBin string, 
 	if s.Filebeat == nil {
 		s.Filebeat = s.Markers.Build
 	}
+	// Go 1.11 binaries (Filebeat 6) lack embedded buildinfo; use the log.
+	if s.Filebeat != nil && s.Filebeat.GoVersion == "" && s.Markers.Build != nil && s.Markers.Build.GoVersion != "" {
+		s.Filebeat.GoVersion = s.Markers.Build.GoVersion
+	}
 	samples, err := readNDJSON[Sample](filepath.Join(runDir, "metrics.ndjson"))
 	if err != nil {
 		logger.Printf("report: %v", err)
@@ -932,7 +976,9 @@ func renderMarkdown(s Summary) string {
 			f.OutputEventsAcked, f.EventsAdded, f.EventsDone, f.EventsActive)
 		fmt.Fprintf(&b, "- harvester started/closed/running/open_files: %d/%d/%d/%d\n",
 			f.HarvesterStarted, f.HarvesterClosed, f.HarvesterRunning, f.HarvesterOpenFiles)
-		fmt.Fprintf(&b, "- filestream files_matched/files_unique: %d/%d\n", f.FilesMatched, f.FilesUnique)
+		if !s.Run.Compatibility {
+			fmt.Fprintf(&b, "- filestream files_matched/files_unique: %d/%d\n", f.FilesMatched, f.FilesUnique)
+		}
 	}
 	if in := s.FinalInputs; in != nil {
 		fmt.Fprintf(&b, "- inputs events/bytes processed: %d/%d, files opened/closed: %d/%d\n",

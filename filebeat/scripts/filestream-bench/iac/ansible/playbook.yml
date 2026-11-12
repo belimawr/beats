@@ -155,7 +155,18 @@
         extra_opts: [--strip-components=1]
       when: filebeat_binary_path | length == 0 and filebeat_tarball_path | length > 0
 
-    # Source c: released or -SNAPSHOT version
+    # Source c: explicit tar.gz URL
+    - name: Download filebeat tar.gz from URL
+      ansible.builtin.get_url:
+        url: "{{ filebeat_url }}"
+        dest: /var/tmp/filebeat.tar.gz
+        mode: '0644'
+        timeout: 300
+      when: >-
+        filebeat_binary_path | length == 0 and filebeat_tarball_path | length == 0
+        and filebeat_url | length > 0
+
+    # Source d: released or -SNAPSHOT version
     - name: Download filebeat tar.gz
       ansible.builtin.get_url:
         url: "https://artifacts.elastic.co/downloads/beats/filebeat/{{ filebeat_tgz_name }}"
@@ -164,6 +175,7 @@
         timeout: 300
       when: >-
         filebeat_binary_path | length == 0 and filebeat_tarball_path | length == 0
+        and filebeat_url | length == 0
         and filebeat_version | length > 0 and not (filebeat_is_snapshot | bool)
 
     - name: Look up filebeat snapshot tar.gz URL
@@ -176,6 +188,7 @@
       become: false
       when: >-
         filebeat_binary_path | length == 0 and filebeat_tarball_path | length == 0
+        and filebeat_url | length == 0
         and filebeat_version | length > 0 and (filebeat_is_snapshot | bool)
 
     - name: Download filebeat snapshot tar.gz
@@ -190,6 +203,7 @@
       delay: 15
       when: >-
         filebeat_binary_path | length == 0 and filebeat_tarball_path | length == 0
+        and filebeat_url | length == 0
         and filebeat_version | length > 0 and (filebeat_is_snapshot | bool)
 
     - name: Extract the downloaded filebeat tar.gz
@@ -200,7 +214,7 @@
         extra_opts: [--strip-components=1]
       when: >-
         filebeat_binary_path | length == 0 and filebeat_tarball_path | length == 0
-        and filebeat_version | length > 0
+        and (filebeat_version | length > 0 or filebeat_url | length > 0)
 
     - name: Remove the downloaded filebeat tar.gz
       ansible.builtin.file:
@@ -208,7 +222,7 @@
         state: absent
       when: >-
         filebeat_binary_path | length == 0 and filebeat_tarball_path | length == 0
-        and filebeat_version | length > 0
+        and (filebeat_version | length > 0 or filebeat_url | length > 0)
 
     - name: Ensure the filebeat binary is executable
       ansible.builtin.file:
@@ -216,7 +230,7 @@
         mode: '0755'
       when: >-
         filebeat_binary_path | length == 0 and filebeat_tarball_path | length == 0
-        and filebeat_version | length > 0
+        and (filebeat_version | length > 0 or filebeat_url | length > 0)
 
     - name: Verify filebeat runs
       ansible.builtin.command: "{{ filebeat_home }}/filebeat version --strict.perms=false"

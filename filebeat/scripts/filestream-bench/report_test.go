@@ -60,12 +60,17 @@ func TestMain(m *testing.M) {
 // fakeFilebeat emulates the parts of Filebeat the harness talks to: log
 // markers, /stats, /inputs/, pprof endpoints, registry files and SIGTERM.
 //
+// With --httpprof=<addr> (or filebeat.registry_file in the config) it behaves
+// like Filebeat 6: single-file registry, Filebeat 6 JSON logs in
+// logs/filebeat, no /inputs/, a reduced /stats, pprof on a separate listener
+// and stdout expected to be /dev/null.
+//
 //nolint:gosec // test-only process; paths come from the harness command line
 func fakeFilebeat() int {
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGTERM)
 
-	var cfgPath, logsDir string
+	var cfgPath, logsDir, pprofAddr string
 	args := os.Args[1:]
 	if len(args) > 0 && args[0] == "version" {
 		fmt.Fprintln(os.Stdout, fakeVersionLine)
@@ -77,6 +82,8 @@ func fakeFilebeat() int {
 			cfgPath = args[i+1]
 		case strings.HasPrefix(a, "--path.logs="):
 			logsDir = strings.TrimPrefix(a, "--path.logs=")
+		case strings.HasPrefix(a, "--httpprof="):
+			pprofAddr = strings.TrimPrefix(a, "--httpprof=")
 		}
 	}
 	cfg, err := os.ReadFile(cfgPath)
@@ -85,12 +92,41 @@ func fakeFilebeat() int {
 		return 1
 	}
 	port := regexp.MustCompile(`(?m)^  port: (\d+)$`).FindSubmatch(cfg)[1]
-	registry := regexp.MustCompile(`(?m)^  path: "(.*)"$`).FindSubmatch(cfg)[1]
+	regFileMatch := regexp.MustCompile(`(?m)^filebeat\.registry_file: "(.*)"$`).FindSubmatch(cfg)
+	compat := pprofAddr != "" || regFileMatch != nil
 	events, _ := strconv.ParseInt(os.Getenv("FSBENCH_FAKE_EVENTS"), 10, 64)
 	files, _ := strconv.ParseInt(os.Getenv("FSBENCH_FAKE_FILES"), 10, 64)
 
+	if compat {
+		// Filebeat 6 console output goes to stdout, which the harness
+		// must have redirected to /dev/null.
+		devNull, err := os.Stat(os.DevNull)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 1
+		}
+		stdout, err := os.Stdout.Stat()
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 1
+		}
+		if !os.SameFile(devNull, stdout) {
+			fmt.Fprintln(os.Stderr, "compat mode: stdout is not /dev/null")
+			return 1
+		}
+		fmt.Fprintln(os.Stdout, `{"@timestamp":"2026-10-30T12:00:00.000Z","message":"console event"}`)
+		if regFileMatch == nil || pprofAddr == "" {
+			fmt.Fprintln(os.Stderr, "compat mode: registry_file and --httpprof are both required")
+			return 1
+		}
+	}
+
 	_ = os.MkdirAll(logsDir, 0o755)
-	logFile, err := os.Create(filepath.Join(logsDir, "filebeat-20261030.ndjson"))
+	logName := "filebeat-20261030.ndjson"
+	if compat {
+		logName = "filebeat"
+	}
+	logFile, err := os.Create(filepath.Join(logsDir, logName))
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return 1
@@ -100,22 +136,41 @@ func fakeFilebeat() int {
 	logMsg := func(level, msg string) {
 		logMu.Lock()
 		defer logMu.Unlock()
-		b, _ := json.Marshal(map[string]string{
+		keys := map[string]string{
 			"log.level":  level,
 			"@timestamp": time.Now().Format("2006-01-02T15:04:05.000Z0700"),
 			"message":    msg,
-		})
+		}
+		if compat {
+			keys = map[string]string{
+				"level":     level,
+				"timestamp": time.Now().Format("2006-01-02T15:04:05.000Z0700"),
+				"message":   msg,
+			}
+		}
+		b, _ := json.Marshal(keys)
 		_, _ = logFile.Write(append(b, '\n'))
 	}
 
-	regHome := filepath.Join(string(registry), "filebeat")
-	_ = os.MkdirAll(regHome, 0o755)
-	_ = os.WriteFile(filepath.Join(regHome, "log.json"), []byte("{}\n"), 0o600)
+	if compat {
+		regFile := string(regFileMatch[1])
+		_ = os.MkdirAll(filepath.Dir(regFile), 0o755)
+		_ = os.WriteFile(regFile, []byte("[]\n"), 0o600)
+	} else {
+		registry := regexp.MustCompile(`(?m)^  path: "(.*)"$`).FindSubmatch(cfg)[1]
+		regHome := filepath.Join(string(registry), "filebeat")
+		_ = os.MkdirAll(regHome, 0o755)
+		_ = os.WriteFile(filepath.Join(regHome, "log.json"), []byte("{}\n"), 0o600)
+	}
 
 	start := time.Now()
 	logMsg("info", "filebeat start running.")
 	time.Sleep(20 * time.Millisecond)
-	logMsg("info", "Finished loading transaction log file for 'x'. Active transaction id=0")
+	if compat {
+		logMsg("info", "States Loaded from registrar: 0")
+	} else {
+		logMsg("info", "Finished loading transaction log file for 'x'. Active transaction id=0")
+	}
 	logMsg("info", "Loading Inputs: 1")
 	time.Sleep(20 * time.Millisecond)
 	logMsg("info", "Loading and starting Inputs completed. Enabled inputs: 1")
@@ -128,17 +183,38 @@ func fakeFilebeat() int {
 		if time.Since(start) > 500*time.Millisecond {
 			acked, running = events, 0
 		}
+		cpuMS := time.Since(start).Milliseconds() / 10
+		if compat {
+			// Filebeat 6: no memory_sys, goroutines or filestream; every
+			// file adds two state-only events.
+			evs := acked
+			if acked > 0 {
+				evs += 2 * files
+			}
+			fmt.Fprintf(w, `{"beat":{"cpu":{"total":{"time":{"ms":%d}}},`+
+				`"memstats":{"memory_alloc":4194304}},`+
+				`"filebeat":{"events":{"active":0,"added":%d,"done":%d},"harvester":{"started":%d,"closed":%d,"running":%d}},`+
+				`"libbeat":{"output":{"events":{"acked":%d}}}}`,
+				cpuMS, evs, evs, files, files, running, acked)
+			return
+		}
 		fmt.Fprintf(w, `{"beat":{"cpu":{"total":{"time":{"ms":%d}}},"runtime":{"goroutines":10},`+
 			`"memstats":{"memory_alloc":4194304,"memory_sys":16777216}},`+
 			`"filebeat":{"events":{"active":0,"added":%d,"done":%d},"harvester":{"started":%d,"closed":%d,"running":%d},`+
 			`"filestream":{"files_matched":%d,"files_unique":%d}},"libbeat":{"output":{"events":{"acked":%d}}}}`,
-			time.Since(start).Milliseconds()/10, acked, acked, files, files, running, files, files, acked)
+			cpuMS, acked, acked, files, files, running, files, files, acked)
 	})
-	mux.HandleFunc("/inputs/", func(w http.ResponseWriter, _ *http.Request) {
-		fmt.Fprint(w, `[{"id":"bench-filestream","input":"filestream","events_processed_total":1,"bytes_processed_total":200}]`)
-	})
-	mux.HandleFunc("/debug/pprof/", pprof.Index)
-	mux.HandleFunc("/debug/pprof/profile", pprof.Profile)
+	if !compat {
+		mux.HandleFunc("/inputs/", func(w http.ResponseWriter, _ *http.Request) {
+			fmt.Fprint(w, `[{"id":"bench-filestream","input":"filestream","events_processed_total":1,"bytes_processed_total":200}]`)
+		})
+	}
+	pprofMux := mux
+	if compat {
+		pprofMux = http.NewServeMux()
+	}
+	pprofMux.HandleFunc("/debug/pprof/", pprof.Index)
+	pprofMux.HandleFunc("/debug/pprof/profile", pprof.Profile)
 
 	var lc net.ListenConfig
 	l, err := lc.Listen(context.Background(), "tcp", "127.0.0.1:"+string(port))
@@ -149,10 +225,24 @@ func fakeFilebeat() int {
 	srv := &http.Server{Handler: mux, ReadHeaderTimeout: time.Second}
 	go func() { _ = srv.Serve(l) }()
 
+	var pprofSrv *http.Server
+	if compat {
+		pl, err := lc.Listen(context.Background(), "tcp", pprofAddr)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 1
+		}
+		pprofSrv = &http.Server{Handler: pprofMux, ReadHeaderTimeout: time.Second}
+		go func() { _ = pprofSrv.Serve(pl) }()
+	}
+
 	<-sig
 	logMsg("info", "Stopping filebeat")
 	time.Sleep(300 * time.Millisecond)
 	_ = srv.Close()
+	if pprofSrv != nil {
+		_ = pprofSrv.Close()
+	}
 	logMsg("info", "filebeat stopped.")
 	return 0
 }
@@ -325,6 +415,235 @@ func TestRunEndToEndWithFakeFilebeat(t *testing.T) {
 	})
 }
 
+func TestRunEndToEndCompatibilityWithFakeFilebeat(t *testing.T) {
+	if testing.Short() {
+		t.Skip("end-to-end run skipped in -short mode")
+	}
+	if _, err := exec.LookPath("go"); err != nil {
+		t.Skip("go binary required for pprof report")
+	}
+	self, err := os.Executable()
+	require.NoError(t, err, "test executable path")
+	t.Setenv(fakeFilebeatEnv, "1")
+	t.Setenv("FSBENCH_FAKE_EVENTS", "50")
+	t.Setenv("FSBENCH_FAKE_FILES", "10")
+
+	work := t.TempDir()
+	opts := RunOptions{
+		FilebeatBin:           self,
+		WorkDir:               work,
+		RunDir:                filepath.Join(work, "runs", "r1"),
+		CorpusDir:             filepath.Join(work, corpusDirName),
+		DataDir:               filepath.Join(work, "data"),
+		RegistryDir:           filepath.Join(work, "data", "registry"),
+		Backend:               "memlog",
+		GrowingFingerprint:    true,
+		HarvesterLimit:        1000,
+		CheckInterval:         5 * time.Minute,
+		CloseOnEOF:            true,
+		HTTPPort:              freePort(t),
+		Compatibility:         true,
+		Files:                 10,
+		ExpectedEvents:        50,
+		SteadyWait:            700 * time.Millisecond,
+		MetricsInterval:       100 * time.Millisecond,
+		FastWindow:            time.Second,
+		InitialProfileDelay:   200 * time.Millisecond,
+		FastProfileInterval:   500 * time.Millisecond,
+		SteadyProfileInterval: time.Second,
+		CPUProfileDuration:    time.Second,
+		ReadyTimeout:          10 * time.Second,
+		ShutdownTimeout:       0, // wait for the graceful exit
+	}
+
+	res, err := Run(t.Context(), testLogger(), opts)
+	require.NoError(t, err, "compatibility benchmark run")
+	assert.True(t, res.Completed, "run must complete")
+	assert.False(t, res.Killed, "fake filebeat must exit on SIGTERM")
+	assert.Equal(
+		t,
+		0,
+		res.ExitCode,
+		"exit code; non-zero means stdout was not /dev/null or flags were wrong",
+	)
+	assert.Equal(t, modeFresh, res.Mode, "mode")
+	assert.True(t, res.Compatibility, "compatibility recorded in run.json")
+	assert.Positive(t, res.PprofPort, "pprof port recorded in run.json")
+	assert.NotEqual(
+		t,
+		opts.HTTPPort,
+		res.PprofPort,
+		"pprof listens on its own port",
+	)
+
+	cfg, err := os.ReadFile(filepath.Join(opts.RunDir, "filebeat.yml"))
+	require.NoError(t, err, "read filebeat.yml")
+	assert.Contains(t, string(cfg), "- type: log", "log input rendered")
+	assert.Contains(
+		t,
+		string(cfg),
+		"filebeat.registry_file:",
+		"registry_file rendered",
+	)
+	assert.NoFileExists(
+		t,
+		filepath.Join(opts.RunDir, "filebeat.stdout"),
+		"stdout must go to /dev/null, not to a file",
+	)
+	assert.FileExists(
+		t,
+		filepath.Join(opts.RunDir, "filebeat.stderr"),
+		"stderr is still captured",
+	)
+	assert.FileExists(
+		t,
+		filepath.Join(opts.RegistryDir, "registry"),
+		"registry file written by the fake at filebeat.registry_file",
+	)
+	assert.FileExists(
+		t,
+		filepath.Join(opts.RunDir, "logs", "filebeat"),
+		"Filebeat 6 log file",
+	)
+
+	recs, err := readNDJSON[ProfileRecord](
+		filepath.Join(opts.RunDir, "profiles.ndjson"),
+	)
+	require.NoError(t, err, "read profiles.ndjson")
+	var pre *ProfileRecord
+	for i := range recs {
+		if recs[i].Label == "pre-shutdown" {
+			pre = &recs[i]
+		}
+	}
+	require.NotNil(
+		t,
+		pre,
+		"pre-shutdown profile captured via --httpprof; records: %+v",
+		recs,
+	)
+	assert.Empty(t, pre.Errors, "pre-shutdown profile errors")
+	for _, f := range []string{pre.HeapFile, pre.GoroutineFile, pre.CPUFile} {
+		assert.FileExists(
+			t,
+			filepath.Join(opts.RunDir, f),
+			"profile file %s",
+			f,
+		)
+	}
+	require.NotNil(t, pre.MemStats, "memstats fetched from the pprof listener")
+
+	samples, err := readNDJSON[Sample](
+		filepath.Join(opts.RunDir, "metrics.ndjson"),
+	)
+	require.NoError(t, err, "read metrics.ndjson")
+	require.NotEmpty(t, samples, "samples collected")
+	var sawStats bool
+	for _, sm := range samples {
+		assert.Nil(t, sm.Inputs, "no /inputs/ in compatibility mode")
+		for _, e := range sm.Errors {
+			assert.NotContains(t, e, "inputs", "no /inputs/ errors expected")
+		}
+		if sm.Stats != nil {
+			sawStats = true
+			assert.Zero(t, sm.Stats.Goroutines, "no goroutines in v6 stats")
+			assert.Zero(t, sm.Stats.MemorySys, "no memory_sys in v6 stats")
+			assert.Zero(t, sm.Stats.FilesUnique, "no filestream in v6 stats")
+		}
+	}
+	assert.True(t, sawStats, "/stats collected")
+
+	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Minute)
+	defer cancel()
+	s, err := BuildReport(ctx, testLogger(), opts.RunDir, "go", nil)
+	require.NoError(t, err, "build report")
+	md, err := os.ReadFile(filepath.Join(opts.RunDir, "summary.md"))
+	require.NoError(t, err, "read summary.md")
+
+	assert.True(t, s.Run.Compatibility, "compatibility in summary")
+	assert.Equal(t, 1, s.Markers.LogFiles, "Filebeat 6 log file found")
+	assert.Equal(t, 1, s.Markers.Warnings, "warning counted from \"level\"")
+	require.False(
+		t,
+		s.Markers.RegistryLoaded.IsZero(),
+		"\"States Loaded from registrar\" recognised",
+	)
+	require.NotNil(t, s.Stages.RegistryInitS, "registry init stage")
+	assert.GreaterOrEqual(t, *s.Stages.RegistryInitS, 0.0, "registry init")
+	assert.NotNil(t, s.Stages.IngestS, "ingest stage")
+	assert.NotNil(t, s.Stages.ShutdownLogS, "shutdown log stage")
+	assert.Nil(t, s.Stages.FirstScanS, "no files_unique, so no first scan")
+
+	for _, name := range []string{"goroutines", "heap_sys"} {
+		assert.NotContains(
+			t,
+			s.Metrics,
+			name,
+			"metric %s is unavailable on Filebeat 6",
+			name,
+		)
+	}
+	assert.Contains(t, s.Metrics, "heap_alloc", "heap_alloc from /stats")
+	assert.Contains(t, s.Metrics, "cpu_percent", "cpu metric aggregated")
+	assert.Contains(
+		t,
+		s.Metrics,
+		"registry_active_checkpoint_bytes",
+		"v6 registry file reported as the active checkpoint",
+	)
+	assert.Contains(
+		t,
+		s.Metrics,
+		"profile_heap_inuse",
+		"HeapInuse from profile captures",
+	)
+	assert.NotContains(
+		t,
+		string(md),
+		"files_matched/files_unique",
+		"summary.md omits filestream counters",
+	)
+	assert.NotContains(
+		t,
+		string(md),
+		"goroutines",
+		"summary.md omits unavailable goroutines",
+	)
+
+	if _, err := exec.LookPath("gnuplot"); err == nil {
+		assert.Empty(t, s.ChartsError, "chart generation errors")
+		for _, name := range []string{chartMemory, chartThroughput, chartCPU} {
+			assert.True(
+				t,
+				hasChart(s.Charts, name),
+				"chart %s generated",
+				name,
+			)
+		}
+	} else {
+		assert.Contains(
+			t,
+			s.ChartsError,
+			"gnuplot not found",
+			"missing gnuplot reported, not fatal",
+		)
+	}
+
+	t.Run("keep registry", func(t *testing.T) {
+		opts := opts
+		opts.KeepRegistry = true
+		opts.RunDir = filepath.Join(work, "runs", "r2")
+		opts.SteadyWait = 100 * time.Millisecond
+		opts.HTTPPort = freePort(t)
+		res, err := Run(t.Context(), testLogger(), opts)
+		require.NoError(t, err, "warm compatibility run")
+		assert.True(t, res.Completed, "warm run must complete")
+		assert.Equal(t, modeWarm, res.Mode, "mode")
+		assert.True(t, res.Compatibility, "compatibility recorded")
+		assert.Equal(t, 0, res.ExitCode, "exit code")
+	})
+}
+
 func TestRunInterrupted(t *testing.T) {
 	if testing.Short() {
 		t.Skip("end-to-end run skipped in -short mode")
@@ -423,6 +742,98 @@ func TestScanLogs(t *testing.T) {
 	require.NotNil(t, st.ShutdownLogS, "shutdown from logs")
 	assert.InDelta(t, 5, *st.ShutdownLogS, 1e-9, "shutdown log seconds")
 	assert.Nil(t, st.HTTPReadyS, "missing ready time yields nil")
+}
+
+func TestScanLogsFilebeat6(t *testing.T) {
+	logs := strings.Join([]string{
+		`{"level":"info","timestamp":"2026-10-30T12:00:00.000-0400","logger":"beat","message":"filebeat start running."}`,
+		`{"level":"info","timestamp":"2026-10-30T12:00:01.500-0400","logger":"registrar","message":"States Loaded from registrar: 10"}`,
+		`{"level":"info","timestamp":"2026-10-30T12:00:02.000-0400","message":"Loading Inputs: 1"}`,
+		`{"level":"info","timestamp":"2026-10-30T12:00:03.250-0400","message":"Loading and starting Inputs completed. Enabled inputs: 1"}`,
+		`{"level":"warn","timestamp":"2026-10-30T12:00:03.500-0400","message":"careful"}`,
+		`{"level":"error","timestamp":"2026-10-30T12:00:04.000-0400","message":"boom"}`,
+		`{"level":"error","timestamp":"2026-10-30T12:00:04.500-0400","message":"boom again"}`,
+		`not json`,
+		`{"level":"info","timestamp":"2026-10-30T12:10:00.000-0400","message":"Stopping filebeat"}`,
+		`{"level":"info","timestamp":"2026-10-30T12:10:05.000-0400","message":"filebeat stopped."}`,
+	}, "\n")
+	var m LogMarkers
+	require.NoError(t, scanLogs(strings.NewReader(logs), &m), "scan logs")
+	assert.Equal(t, 9, m.Lines, "valid JSON lines")
+	assert.Equal(t, 2, m.Errors, "error count from \"level\"")
+	assert.Equal(t, 1, m.Warnings, "warning count from \"level\"")
+
+	loc := time.FixedZone("", -4*3600)
+	at := func(h, min, s, ms int) time.Time {
+		return time.Date(2026, 10, 30, h, min, s, ms*int(time.Millisecond), loc)
+	}
+	require.False(t, m.BeatStart.IsZero(), "start marker from \"timestamp\"")
+	assert.True(t, m.BeatStart.Equal(at(12, 0, 0, 0)), "start time")
+	require.False(
+		t,
+		m.RegistryLoaded.IsZero(),
+		"\"States Loaded from registrar\" is the v6 registry marker",
+	)
+	assert.True(t, m.RegistryLoaded.Equal(at(12, 0, 1, 500)), "registry loaded")
+	assert.False(t, m.LoadingInputs.IsZero(), "loading inputs marker")
+	require.False(t, m.InputsStarted.IsZero(), "inputs started marker")
+	assert.True(t, m.InputsStarted.Equal(at(12, 0, 3, 250)), "inputs started")
+	assert.False(t, m.Stopping.IsZero(), "stopping marker")
+	assert.False(t, m.BeatStopped.IsZero(), "stopped marker")
+	assert.True(t, m.RegistryMigration.IsZero(), "no registry migration in v6")
+
+	// Mixed generations: the new format wins when both keys are present.
+	var mixed LogMarkers
+	both := `{"log.level":"error","@timestamp":"2026-10-30T12:00:00.000-0400",` +
+		`"level":"info","timestamp":"2027-01-01T00:00:00.000-0400",` +
+		`"message":"filebeat start running."}`
+	require.NoError(t, scanLogs(strings.NewReader(both), &mixed), "scan logs")
+	assert.Equal(t, 1, mixed.Errors, "log.level preferred over level")
+	require.False(t, mixed.BeatStart.IsZero(), "start marker")
+	assert.True(
+		t,
+		mixed.BeatStart.Equal(at(12, 0, 0, 0)),
+		"@timestamp preferred over timestamp",
+	)
+}
+
+func TestParseLogsFilebeat6Files(t *testing.T) {
+	dir := t.TempDir()
+	line := func(msg string) string {
+		return `{"level":"info","timestamp":"2026-10-30T12:00:00.000-0400","message":"` +
+			msg + `"}` + "\n"
+	}
+	write := func(name, content string) {
+		require.NoError(
+			t,
+			os.WriteFile(filepath.Join(dir, name), []byte(content), 0o600),
+			"write %s",
+			name,
+		)
+	}
+	write("filebeat", line("filebeat start running."))
+	write("filebeat.1", line("States Loaded from registrar: 3"))
+	write("filebeat.2", line("filebeat stopped."))
+	write("filebeat-20261030.ndjson", `{"log.level":"info","message":"x"}`+"\n")
+	write("filebeat.keep", line("Stopping filebeat"))
+	require.NoError(
+		t,
+		os.Mkdir(filepath.Join(dir, "filebeat.9"), 0o755),
+		"directories must be ignored",
+	)
+
+	m, err := parseLogs(dir)
+	require.NoError(t, err, "parse logs")
+	assert.Equal(
+		t,
+		4,
+		m.LogFiles,
+		"filebeat, filebeat.<N> and *.ndjson; not filebeat.keep or directories",
+	)
+	assert.False(t, m.BeatStart.IsZero(), "start marker from filebeat")
+	assert.False(t, m.RegistryLoaded.IsZero(), "registry marker from filebeat.1")
+	assert.False(t, m.BeatStopped.IsZero(), "stopped marker from filebeat.2")
+	assert.True(t, m.Stopping.IsZero(), "filebeat.keep must not be scanned")
 }
 
 func TestScanLogsBuildInfo(t *testing.T) {

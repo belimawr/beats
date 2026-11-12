@@ -322,7 +322,10 @@ func buildTimeSeries(samples []Sample, start time.Time) tsTable {
 		if st := s.Stats; st != nil {
 			row[colHarvClosed] = float64(st.HarvesterClosed)
 			row[colFilesUnique] = float64(st.FilesUnique)
-			row[colGoroutines] = float64(st.Goroutines)
+			// Filebeat 6 /stats has no goroutines; keep NaN so it is omitted.
+			if st.Goroutines > 0 {
+				row[colGoroutines] = float64(st.Goroutines)
+			}
 			if dt := s.Time.Sub(prevTime).Seconds(); !prevTime.IsZero() && dt > 0 {
 				if st.OutputEventsAcked >= prevAcked {
 					row[colAckRate] = float64(st.OutputEventsAcked-prevAcked) / dt
@@ -646,6 +649,11 @@ func generateCharts(ctx context.Context, runDir string, s *Summary, samples []Sa
 		profileClauses = append(profileClauses, plotClause{file: profilesFile, col: 2, title: "pprof inuse_space (profile)",
 			color: "#8c564b", style: "points pt 9 ps 1.3", max: ps.maxPprof})
 	}
+	// Filebeat 6 has no filestream.files_unique; avoid plotting a flat 0 line.
+	var filesUnique []plotClause
+	if ts.positive[colFilesUnique] || !s.Run.Compatibility {
+		filesUnique = styled(colFilesUnique, "files_unique (discovered)", "#17becf", dashedStyle, true)
+	}
 	var storage []plotClause
 	if ts.positive[colStorageDB] {
 		storage = tsClause(colStorageDB, "storage_db (bbolt)", "#9467bd", true)
@@ -665,7 +673,7 @@ func generateCharts(ctx context.Context, runDir string, s *Summary, samples []Sa
 				profileClauses,
 				tsClause(colHarvClosed, "harvester_closed (files done)", "#2ca02c", true),
 				// Dashed: it usually overlaps harvester_closed once ingestion is done.
-				styled(colFilesUnique, "files_unique (discovered)", "#17becf", dashedStyle, true)),
+				filesUnique),
 			markers, xmax)},
 		{name: chartThroughput, script: timeSeriesScript(chartThroughput+".svg",
 			"Ingestion throughput and harvester concurrency", "ACK rate (events/s)", "Count",
