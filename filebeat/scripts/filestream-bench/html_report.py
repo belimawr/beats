@@ -102,14 +102,18 @@ GiB = 1 << 30
 
 DEFAULT_BRAND = "Filestream Benchmark Report"
 PALETTE = [
-    "#ff6b6b",
-    "#5dd39e",
-    "#58a6ff",
-    "#c792ea",
-    "#ffb454",
-    "#ffd866",
-    "#73d0ff",
-    "#f07178",
+    "#ff6b6b",  # red (baseline)
+    "#2dd4bf",  # teal
+    "#3b82f6",  # royal blue
+    "#c084fc",  # purple
+    "#fb923c",  # orange
+    "#facc15",  # yellow
+    "#4ade80",  # lime green
+    "#f472b6",  # hot magenta-pink
+    "#38bdf8",  # sky cyan
+    "#a3e635",  # chartreuse
+    "#818cf8",  # indigo
+    "#d4a373",  # warm tan
 ]
 COLOR_RE = re.compile(r"^#[0-9a-fA-F]{3,8}$")
 DEFAULT_CHARTS = (
@@ -1083,6 +1087,8 @@ EXTRA_CSS = """
 h2.section-title { margin: 26px 0 0; }
 .mem-notes { margin: 16px 0 0; padding-left: 20px; color: #c9d5e8; font-size: 1.3rem; line-height: 1.55; } .mem-notes li { margin: 4px 0; } .mem-notes strong { color: #e8edf7; }
 .retainer-notes h3 { margin: 18px 0 0; font-size: 1.05rem; color: #e8edf7; } .retainer-notes .retainer-summary { margin: 8px 0 0; color: #c9d5e8; font-size: 1.3rem; line-height: 1.55; } .retainer-notes .mem-notes { margin-top: 8px; } .retainer-notes .vals { color: #8fa3c4; white-space: nowrap; }
+.chart-tip { position: fixed; z-index: 1000; pointer-events: none; padding: 5px 10px; border: 1px solid #3d5f91; border-radius: 6px; background: #131c2bf2; color: #f1f6ff; font-size: .82rem; font-weight: 600; white-space: nowrap; box-shadow: 0 4px 14px #00000080; opacity: 0; transition: opacity .12s ease; }
+.chart-tip.visible { opacity: 1; }
 """
 
 JS = r"""
@@ -1097,6 +1103,49 @@ function activate(id) {
 buttons.forEach(button => button.addEventListener("click", () => activate(button.dataset.view)));
 const initial = location.hash.slice(1);
 activate(document.getElementById(initial) ? initial : "overview");
+
+const tip = document.createElement("div");
+tip.className = "chart-tip";
+document.body.appendChild(tip);
+let tipTimer = null, tipTarget = null, tipX = 0, tipY = 0;
+function placeTip() {
+  const pad = 12;
+  let x = tipX + pad, y = tipY + pad;
+  const r = tip.getBoundingClientRect();
+  if (x + r.width > window.innerWidth - 8) x = tipX - r.width - pad;
+  if (y + r.height > window.innerHeight - 8) y = tipY - r.height - pad;
+  tip.style.left = Math.max(8, x) + "px";
+  tip.style.top = Math.max(8, y) + "px";
+}
+function hideTip() {
+  clearTimeout(tipTimer);
+  tipTimer = null;
+  tipTarget = null;
+  tip.classList.remove("visible");
+}
+document.addEventListener("mouseover", e => {
+  const el = e.target.closest("[data-tooltip]");
+  if (el === tipTarget) return;
+  hideTip();
+  if (!el) return;
+  tipTarget = el;
+  tipX = e.clientX;
+  tipY = e.clientY;
+  tipTimer = setTimeout(() => {
+    tip.textContent = el.getAttribute("data-tooltip");
+    placeTip();
+    tip.classList.add("visible");
+  }, 1000);
+});
+document.addEventListener("mousemove", e => {
+  if (!tipTarget) return;
+  tipX = e.clientX;
+  tipY = e.clientY;
+  if (tip.classList.contains("visible")) placeTip();
+});
+document.addEventListener("mouseout", e => {
+  if (tipTarget && !tipTarget.contains(e.relatedTarget)) hideTip();
+});
 """
 
 
@@ -1346,9 +1395,12 @@ RETAINER_DESCRIPTIONS = (
     (("filestream.(*fileScanner).newScanState",),
      "Scanner state map and per-file scan bookkeeping kept across "
      "<code>fileWatcher.ScanOnce</code> cycles."),
-    (("filestream.(*fileScanner).rawHex",),
-     "Hex-encoded 1 KiB file header strings attached during "
-     "<code>ScanOnce</code> for bridging/fingerprint checks."),
+    (("filestream.(*fileScanner).GetFiles",),
+     "Per-scan matched <code>FileDescriptor</code> results and path structures "
+     "built while walking configured glob patterns."),
+    (("filestream.(*fileScanner).rawHex", "hex.EncodeToString"),
+     "Hex-encoded file fingerprint and 1 KiB header strings allocated during "
+     "<code>ScanOnce</code> for identity and bridging checks."),
     (("filestream.(*fileScanner).toFileDescriptor",),
      "<code>fileDescriptor</code> structs constructed for each matched file "
      "during directory scanning."),
@@ -1370,6 +1422,20 @@ RETAINER_DESCRIPTIONS = (
     (("input-logfile.(*harvesterRunner).enqueue",),
      "Per-queued-file <code>sourceState</code>, cancel context, and logger "
      "allocated when scheduling a file for harvesting."),
+    (("input-logfile.startHarvester",),
+     "Per-file harvester goroutine closure, state, and logger allocated before "
+     "acquiring a harvester concurrency slot."),
+    (("semaphore.(*Weighted).Acquire",),
+     "Waiter nodes in <code>golang.org/x/sync/semaphore</code> for goroutines "
+     "blocked waiting on <code>harvester_limit</code>."),
+    (("input-logfile.newUpdateOp",),
+     "<code>updateOp</code> structs attached to <code>event.Private</code> to "
+     "carry pending file state updates through the publisher ACK pipeline."),
+    (("common.(*GenericEventConverter).normalizeMap", "common.normalizeMap"),
+     "Normalized <code>mapstr.M</code> event field maps allocated by the "
+     "publisher pipeline's generic event converter."),
+    (("runtime.mallocgc",),
+     "Go runtime heap allocator frames for inlined small object allocations."),
     (("bufferpool.init.NewPool.func1",),
      "Pooled <code>zap</code> log buffers "
      "(<code>go.uber.org/zap/internal/bufferpool</code>), typically allocated "
@@ -1881,18 +1947,19 @@ def _bar_panels(runs, panels, label, cols=2):
         for i, r in enumerate(runs):
             ry = py + 44 + i * 36
             v = vals[i]
+            tip = f'data-tooltip="{e(r.name, quote=True)}"'
             out.append(
-                f'<rect x="{px + BAR_X}" y="{ry}" width="{bar_max_w:g}" height="22" rx="4" class="track"/>'
+                f'<rect x="{px + BAR_X}" y="{ry}" width="{bar_max_w:g}" height="22" rx="4" class="track" {tip}/>'
             )
             if v is None:
-                out.append(f'<text x="{px + val_x:g}" y="{ry + 15}" class="na">n/a</text>')
+                out.append(f'<text x="{px + val_x:g}" y="{ry + 15}" class="na" {tip}>n/a</text>')
                 continue
             w = max(2.0, (v / vmax) * bar_max_w)
             out.append(
-                f'<rect x="{px + BAR_X}" y="{ry}" width="{w:.1f}" height="22" rx="4" fill="{r.color}"/>'
+                f'<rect x="{px + BAR_X}" y="{ry}" width="{w:.1f}" height="22" rx="4" fill="{r.color}" {tip}/>'
             )
             out.append(
-                f'<text x="{px + val_x:g}" y="{ry + 15}" class="val">{e(labels[i])}</text>'
+                f'<text x="{px + val_x:g}" y="{ry + 15}" class="val" {tip}>{e(labels[i])}</text>'
             )
     height = 8 + rows * (ph + 22)
     return _wrap_svg("".join(out), height, label, runs)
@@ -2057,19 +2124,20 @@ def build_memory_svg(runs):
             for r_idx, r in enumerate(runs):
                 val = vals[g_idx][r_idx]
                 bx = gx + r_idx * (bar_w + gap)
+                tip = f'data-tooltip="{e(r.name, quote=True)}"'
                 if val is None:
                     out.append(
-                        f'<text x="{bx + bar_w / 2:.1f}" y="{y0 - 5:.1f}" class="na" text-anchor="middle">n/a</text>'
+                        f'<text x="{bx + bar_w / 2:.1f}" y="{y0 - 5:.1f}" class="na" text-anchor="middle" {tip}>n/a</text>'
                     )
                     continue
                 val_g = val / GiB
                 bh = max(2.0, (val_g / top) * h)
                 by = y0 - bh
                 out.append(
-                    f'<rect x="{bx:.1f}" y="{by:.1f}" width="{bar_w:.1f}" height="{bh:.1f}" rx="3" fill="{r.color}"/>'
+                    f'<rect x="{bx:.1f}" y="{by:.1f}" width="{bar_w:.1f}" height="{bh:.1f}" rx="3" fill="{r.color}" {tip}/>'
                 )
                 out.append(
-                    f'<text x="{bx + bar_w / 2:.1f}" y="{by - 5:.1f}" class="bv" text-anchor="middle">{val_g:.2f}</text>'
+                    f'<text x="{bx + bar_w / 2:.1f}" y="{by - 5:.1f}" class="bv" text-anchor="middle" {tip}>{val_g:.2f}</text>'
                 )
             cx = gx + (n * bar_w + (n - 1) * gap) / 2
             out.append(f'<text x="{cx:.1f}" y="{y0 + 18:.1f}" class="ax" text-anchor="middle">{e(gname)}</text>')

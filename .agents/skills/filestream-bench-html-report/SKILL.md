@@ -153,8 +153,10 @@ always rendered in red `#ff6b6b`; `--color` and spec `color` on that run are
 ignored (a warning is printed). Its `.experiment` card gets a
 `<span class="badge alt">baseline</span>` next to the name (skipped when the run
 label already contains "baseline"). Order runs accordingly: baseline first, then
-the candidates. Remaining runs use the palette (green, blue, purple, ...) unless
-overridden.
+the candidates. Remaining runs use the 12-color palette (`#2dd4bf` teal,
+`#3b82f6` blue, `#c084fc` purple, `#fb923c` orange, `#facc15` yellow,
+`#4ade80` lime green, `#f472b6` magenta-pink, `#38bdf8` sky cyan, `#a3e635`
+chartreuse, `#818cf8` indigo, `#d4a373` tan) unless overridden.
 
 ## Main page (`#overview`)
 
@@ -194,6 +196,9 @@ Top to bottom:
      panels. Every value/delta `<text class="val">` (and `n/a`) is placed at
      the same fixed x after the track (`px + BAR_X + bar_max_w + 10`), so the
      text is left-aligned in every panel.
+     Every `<rect>` bar/track and `<text>` value label in both overview charts
+     (horizontal and vertical) carries `data-tooltip="{run.name}"` rendered by
+     the page's custom `.chart-tip` popup after 1,000 ms (1s) of hovering.
    - "Memory: peak vs steady state (GiB)": vertical bar graph, two stacked
      panels, `Peak (whole run)` (`metrics.*.peak`) and
      `Steady state (pre-shutdown / steady window)`. Groups in both panels, in
