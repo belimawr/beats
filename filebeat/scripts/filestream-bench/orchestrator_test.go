@@ -109,6 +109,50 @@ benchmarks:
 	assert.Equal(t, 10*time.Minute, b1.Params.CheckInterval, "unset field keeps the default")
 }
 
+func TestParseConfigDefaultOutputDir(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	base := t.TempDir()
+
+	cfg, err := parseTestConfig(t, gcpHeader+`
+defaults:
+  output_dir: ~/sandbox/Filestream-memory-improvements/new
+benchmarks:
+  - name: 02-filebeat-9.5.6
+    filebeat:
+      version: "9.5.6"
+  - name: 10 filestream auto mode BBolt
+    filebeat:
+      version: "9.5.6"
+  - name: custom-out
+    filebeat:
+      version: "9.5.6"
+    output_dir: custom/dir
+`, base)
+	require.NoError(t, err, "parsing config with defaults.output_dir")
+	require.Len(t, cfg.Resolved, 3, "resolved benchmarks")
+
+	wantBase := filepath.Join(home, "sandbox/Filestream-memory-improvements/new")
+	assert.Equal(
+		t,
+		filepath.Join(wantBase, "02-filebeat-9.5.6"),
+		cfg.Resolved[0].OutputDir,
+		"benchmark without output_dir uses defaults.output_dir/<name>",
+	)
+	assert.Equal(
+		t,
+		filepath.Join(wantBase, "10-filestream-auto-mode-BBolt"),
+		cfg.Resolved[1].OutputDir,
+		"spaces in benchmark name are replaced with dashes in subfolder name",
+	)
+	assert.Equal(
+		t,
+		filepath.Join(base, "custom/dir"),
+		cfg.Resolved[2].OutputDir,
+		"explicit benchmark output_dir overrides defaults.output_dir",
+	)
+}
+
 func TestParseConfigProviderAndEnvFallbacks(t *testing.T) {
 	bench := `
 benchmarks:
@@ -192,6 +236,17 @@ benchmarks:
 benchmarks:
   - {name: a, filebeat: {version: "1"}, output_dir: /o}
   - {name: b, filebeat: {version: "1"}, output_dir: /o}
+`,
+			wantErr: "share output_dir",
+		},
+		{
+			name: "shared output_dir with defaults.output_dir",
+			yml: gcpHeader + `
+defaults:
+  output_dir: /o
+benchmarks:
+  - {name: a, filebeat: {version: "1"}}
+  - {name: b, filebeat: {version: "1"}, output_dir: /o/a}
 `,
 			wantErr: "share output_dir",
 		},
@@ -591,6 +646,15 @@ func TestExampleConfigParses(t *testing.T) {
 	require.NoError(t, err, "benchmarks.example.yml must be valid")
 	assert.Equal(t, providerGCP, cfg.Provider, "example provider")
 	assert.Len(t, cfg.Resolved, 5, "example benchmarks")
+	for _, b := range cfg.Resolved {
+		assert.Equal(
+			t,
+			filepath.Join(cfg.Dir, "results", b.Name),
+			b.OutputDir,
+			"example benchmark %q output_dir",
+			b.Name,
+		)
+	}
 }
 
 func TestShellQuote(t *testing.T) {

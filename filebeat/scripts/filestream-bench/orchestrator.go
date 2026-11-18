@@ -373,13 +373,18 @@ type resolvedBenchmark struct {
 	Params    benchParams
 }
 
+type defaultsConfig struct {
+	OutputDir      string `yaml:"output_dir"`
+	benchOverrides `yaml:",inline"`
+}
+
 // orchestratorConfig is the benchmarks.yml schema.
 type orchestratorConfig struct {
 	Provider         string            `yaml:"provider"`
 	SSHPublicKeyFile string            `yaml:"ssh_public_key_file"`
 	GCP              gcpConfig         `yaml:"gcp"`
 	Multipass        multipassConfig   `yaml:"multipass"`
-	Defaults         benchOverrides    `yaml:"defaults"`
+	Defaults         defaultsConfig    `yaml:"defaults"`
 	Benchmarks       []benchmarkConfig `yaml:"benchmarks"`
 
 	// Dir is the absolute directory of the config file; relative paths in the
@@ -490,8 +495,13 @@ func (c *orchestratorConfig) resolve() error {
 		return errors.New("at least one benchmark is required")
 	}
 
+	defaultOutDir, err := expandPath(c.Defaults.OutputDir, c.Dir)
+	if err != nil {
+		return fmt.Errorf("defaults.output_dir: %w", err)
+	}
+
 	base := defaultBenchParams()
-	base.apply(c.Defaults)
+	base.apply(c.Defaults.benchOverrides)
 
 	names := map[string]bool{}
 	slugs := map[string]string{}
@@ -515,12 +525,17 @@ func (c *orchestratorConfig) resolve() error {
 		}
 		slugs[slug] = b.Name
 
-		if b.OutputDir == "" {
-			return fmt.Errorf("benchmark %q: output_dir is required", b.Name)
-		}
-		outDir, err := expandPath(b.OutputDir, c.Dir)
-		if err != nil {
-			return fmt.Errorf("benchmark %q: %w", b.Name, err)
+		var outDir string
+		switch {
+		case b.OutputDir != "":
+			outDir, err = expandPath(b.OutputDir, c.Dir)
+			if err != nil {
+				return fmt.Errorf("benchmark %q: %w", b.Name, err)
+			}
+		case defaultOutDir != "":
+			outDir = filepath.Join(defaultOutDir, strings.ReplaceAll(b.Name, " ", "-"))
+		default:
+			return fmt.Errorf("benchmark %q: output_dir is required (or set defaults.output_dir)", b.Name)
 		}
 		if other, dup := outDirs[outDir]; dup {
 			return fmt.Errorf("benchmarks %q and %q share output_dir %s", other, b.Name, outDir)

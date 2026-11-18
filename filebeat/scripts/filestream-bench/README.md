@@ -226,6 +226,7 @@ multipass:
   launch_timeout_seconds: 600
 
 defaults:                          # any flag of the single-host mode, snake_case
+  output_dir: ./results            # base output dir; each benchmark defaults to <output_dir>/<name>
   files: 500000
   backend: memlog
   growing_fingerprint: true
@@ -234,12 +235,11 @@ defaults:                          # any flag of the single-host mode, snake_cas
   steady_wait: 1m
 
 benchmarks:
-  - name: baseline-9.5.6           # VM slug: baseline-9-5-6
+  - name: baseline-9.5.6           # VM slug: baseline-9-5-6; output_dir: ./results/baseline-9.5.6
     filebeat: {version: "9.5.6"}   # released or -SNAPSHOT version
-    output_dir: ./results/baseline
   - name: fix
     filebeat: {repo: me/beats, ref: my-branch}   # built from a detached worktree
-    output_dir: ./results/fix
+    output_dir: ./results/fix-custom             # optional per-benchmark output_dir override
     growing_fingerprint: false     # per-benchmark override
     max_duration: 0s
 ```
@@ -252,6 +252,10 @@ benchmarks:
   `compatibility`.
   Precedence: benchmark, `defaults`, single-host flag default. Explicit `false`
   and `0s` override a non-zero default.
+- `defaults.output_dir` sets a base directory for benchmark results. When a
+  benchmark omits `output_dir`, it writes to `<defaults.output_dir>/<name>` with
+  spaces in `<name>` replaced by `-`. A per-benchmark `output_dir` overrides the
+  base directory for that benchmark.
 - `compatibility: true` (single-host flag `--compatibility`) benchmarks Filebeat
   6.x: `log` input, `console` output redirected to `/dev/null`, pprof collected
   via `--httpprof` instead of the monitoring HTTP endpoint, and extra

@@ -1081,8 +1081,17 @@ svg .na { fill: #6f7f99; font-size: 10.5px; font-style: italic; } svg .rowsep { 
 # Skeleton-only additions; the block above is kept byte-for-byte.
 EXTRA_CSS = """
 .card dt .at { margin-left: 4px; }
-.card dd .vary { display: flex; align-items: flex-start; gap: 7px; font-size: .95rem; margin-top: 8px; } .card dd .vary:first-child { margin-top: 0; }
-.card dd .vary .dots { display: inline-flex; gap: 3px; padding-top: 5px; flex: none; } .card dd .vary .dot { margin-right: 0; }
+.params-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); align-items: stretch; }
+@media (max-width: 1200px) { .params-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 700px) { .params-grid { grid-template-columns: 1fr; } }
+.params-grid .card { display: flex; flex-direction: column; }
+.card dd .vary-list { display: flex; flex-direction: column; gap: 8px; margin-top: 4px; }
+.card dd .vary { display: grid; grid-template-columns: 56px minmax(0, 1fr); align-items: start; gap: 8px; font-size: .92rem; padding-top: 8px; border-top: 1px solid #232f44; }
+.card dd .vary:first-child { padding-top: 0; border-top: 0; }
+.card dd .vary .dots { display: flex; flex-wrap: wrap; gap: 4px; padding-top: 4px; }
+.card dd .vary .dot { margin-right: 0; width: 10px; height: 10px; }
+.card dd .vary .val-text { min-width: 0; line-height: 1.35; }
+.card dd .vary .val-text small { margin-top: 2px; line-height: 1.35; }
 .experiment p + p { margin-top: 5px; } .experiment .muted { font-size: .83rem; }
 h2.section-title { margin: 26px 0 0; }
 .mem-notes { margin: 16px 0 0; padding-left: 20px; color: #c9d5e8; font-size: 1.3rem; line-height: 1.55; } .mem-notes li { margin: 4px 0; } .mem-notes strong { color: #e8edf7; }
@@ -1135,7 +1144,7 @@ document.addEventListener("mouseover", e => {
     tip.textContent = el.getAttribute("data-tooltip");
     placeTip();
     tip.classList.add("visible");
-  }, 1000);
+  }, 200);
 });
 document.addEventListener("mousemove", e => {
   if (!tipTarget) return;
@@ -1165,15 +1174,15 @@ def render_card(label, per_run, runs):
         lines = []
         for (value, sub), members in groups:
             dots = "".join(
-                f'<span class="dot" title="{e(m.name)}" style="background:{m.color}"></span>'
+                f'<span class="dot" title="{e(m.name)}" data-tooltip="{e(m.name, quote=True)}" style="background:{m.color}"></span>'
                 for m in members
             )
             small = f"<small>{e(sub)}</small>" if sub else ""
             lines.append(
                 f'<div class="vary"><span class="dots">{dots}</span>'
-                f"<span>{e(value)}{small}</span></div>"
+                f'<span class="val-text">{e(value)}{small}</span></div>'
             )
-        dd = "".join(lines)
+        dd = f'<div class="vary-list">{"".join(lines)}</div>'
         dt = f'{e(label)} <span class="at">varies across runs</span>'
     return f'<dl class="card"><dt>{dt}</dt><dd>{dd}</dd></dl>'
 
@@ -1195,15 +1204,18 @@ def render_host(heading, specs, note):
     )
 
 
-def render_run_card(r):
+def _run_commit_html(r):
     fb = r.filebeat
     commit = fb.get("commit") or ""
     if commit and commit != "unknown":
-        commit_s = f"<code>{e(commit[:12])}</code>"
-    elif fb.get("version"):
-        commit_s = f"<code>v{e(str(fb['version']))}</code> <span class=\"muted\">(commit unknown)</span>"
-    else:
-        commit_s = "<code>unknown</code>"
+        return f"<code>{e(commit[:12])}</code>"
+    if fb.get("version"):
+        return f'<code>v{e(str(fb["version"]))}</code> <span class="muted">(commit unknown)</span>'
+    return "<code>unknown</code>"
+
+
+def render_run_card(r):
+    commit_s = _run_commit_html(r)
 
     st = r.stages
     eps = r.events_per_sec
@@ -1228,14 +1240,39 @@ def render_run_card(r):
     ]
     body = "".join(f"<p>{k}: {v}</p>" for k, v in rows)
     label = f'<p class="muted">{md_inline(r.label)}</p>' if r.label else ""
-    desc = f"<p>{md_inline(r.description)}</p>" if r.description else ""
     badge = ""
     if r.is_baseline and "baseline" not in r.label.lower():
         badge = ' <span class="badge alt">baseline</span>'
     return (
         f'<article class="experiment" style="border-left-color:{r.color}">'
         f'<h3><span class="dot" style="background:{r.color}"></span>{e(r.name)}{badge}</h3>'
-        f"{label}{desc}{body}</article>"
+        f"{label}{body}</article>"
+    )
+
+
+def render_benchmark_details_table(runs):
+    if not any(r.description or r.label for r in runs):
+        return ""
+    rows = []
+    for r in runs:
+        badge = ""
+        if r.is_baseline and "baseline" not in r.label.lower():
+            badge = ' <span class="badge alt">baseline</span>'
+        name_cell = (
+            f'<span class="dot" style="background:{r.color}"></span>'
+            f"<strong>{e(r.name)}</strong>{badge}"
+        )
+        if r.label:
+            name_cell += f'<br><span class="at">{md_inline(r.label)}</span>'
+        desc_cell = md_inline(r.description) if r.description else (
+            md_inline(r.label) if r.label else "—"
+        )
+        rows.append((name_cell, desc_cell))
+    return (
+        '<h2 class="section-title">Benchmark details</h2>'
+        '<section class="panel">'
+        + table(("Benchmark", "Description"), rows, numeric_from=99)
+        + "</section>"
     )
 
 
@@ -1410,12 +1447,17 @@ RETAINER_DESCRIPTIONS = (
     (("filestream.(*fileWatcher).HarvesterClosed",),
      "State update notifications queued or processed when harvesters finish "
      "and close at EOF."),
-    (("filestream.(*fileProspector).onFSEvent",),
-     "Prospector filesystem event handling and registry metadata updates per "
-     "discovered file."),
+    (("filestream.(*fileProspector).onFSEvent",
+      "filestream.(*fileProspector).Run"),
+     "Prospector filesystem event handling, per-event logger fields, and "
+     "registry metadata updates per discovered file."),
     (("filestream.(*filestream).OpenSession",),
      "Filestream input session state opened when starting a harvester for a "
      "file."),
+    (("input-logfile.(*Metrics).RegisterHarvesterOffset",),
+     "Active harvester offset entries (<code>*atomic.Int64</code> and map "
+     "entries in <code>Metrics.harvesterOffsets</code>) registered per open "
+     "harvester."),
     (("filestream.(*openFileState).Publish",),
      "Per-event state metadata attached when publishing lines from an open "
      "harvester."),
@@ -1461,15 +1503,18 @@ RETAINER_DESCRIPTIONS = (
     (("os.lstatNolog", "os.statNolog"),
      "<code>os.FileInfo</code> (<code>syscall.Stat_t</code>) structs retained "
      "per discovered file across scanner and state tables."),
+    (("os.(*File).readdir",),
+     "Directory entry slices allocated while reading corpus directories "
+     "during filesystem scans."),
     (("bytealg.MakeNoZero", "bytes.makeSlice", "strings.Join"),
      "Backing byte/string buffers allocated during line reading, JSON "
      "encoding/decoding, or path/ID construction."),
-    (("maps.clone", "mapstr.cloneMap"),
+    (("maps.clone", "maps.Copy", "mapstr.cloneMap"),
      "Cloned <code>mapstr.M</code> metadata/field maps copied during registry "
      "state updates or event publishing."),
-    (("json.compact",),
-     "Buffers allocated by <code>encoding/json</code> while compacting/encoding "
-     "registry or event payloads."),
+    (("json.compact", "time.Time.MarshalJSON"),
+     "Buffers allocated by <code>encoding/json</code> and timestamp "
+     "marshaling while compacting/encoding registry or event payloads."),
     (("common.ReadInodeFromPage",),
      "BBolt (<code>otel_file_storage</code>) B+tree page inode slices decoded "
      "while reading/writing the on-disk database."),
@@ -1481,7 +1526,7 @@ RETAINER_DESCRIPTIONS = (
       "file.StateOS.String"),
      "Filebeat 6 <code>log</code> input / registrar <code>file.State</code> "
      "slices and maps tracking per-file offsets and inode state."),
-    (("log.(*Input).getFiles", "log.getKeys"),
+    (("log.(*Input).getFiles", "log.getKeys", "filepath.glob"),
      "Filebeat 6 <code>log</code> input glob match map and path slice built "
      "during directory scans."),
 )
@@ -2235,12 +2280,13 @@ def render_report(cfg, runs, bench):
         {intro}
       </div>
       {render_host(heading, specs, note)}
-      <h2 class="section-title">Parameters used in the test</h2>
-      <section class="cards">{cards}</section>
       <h2 class="section-title">Benchmarks</h2>
       <section class="grid">{run_cards}</section>
+      <h2 class="section-title">Parameters used in the test</h2>
+      <section class="cards params-grid">{cards}</section>
       <h2 class="section-title">Charts</h2>
       {render_comparison_charts(runs)}
+      {render_benchmark_details_table(runs)}
     </section>"""
 
     return f"""<!doctype html>

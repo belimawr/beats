@@ -28,7 +28,10 @@ multipass:
   launch_timeout_seconds: 600
 
 # Values applied to every benchmark unless overridden by the benchmark entry.
+# When defaults.output_dir is set, each benchmark without its own output_dir
+# writes into <defaults.output_dir>/<name> (with spaces replaced by '-').
 defaults:
+  output_dir: ./results
   files: 500000
   dirs: 5
   file_size: 10240
@@ -49,7 +52,6 @@ benchmarks:
   - name: baseline-9.5.6
     filebeat:
       version: "9.5.6"
-    output_dir: ./results/baseline-9.5.6
 
   # Filebeat 6 from a tar.gz URL, in compatibility mode: `log` input, `console`
   # output to /dev/null, pprof via --httpprof, extra state-event accounting.
@@ -57,14 +59,12 @@ benchmarks:
     filebeat:
       url: "https://dowload.filebeat.example/downloads/beats/filebeat/filebeat-6.8.23-linux-x86_64.tar.gz"
     compatibility: true
-    output_dir: ./results/filebeat-6.8.23
 
   # Build from a git repository at a ref (branch, tag or commit).
   - name: main-memlog
     filebeat:
       repo: elastic/beats
       ref: main
-    output_dir: ./results/main-memlog
 
   # Override per-benchmark parameters inline.
   - name: pr-otel-storage
@@ -73,7 +73,6 @@ benchmarks:
       ref: main
     backend: otel_file_storage
     files: 250000
-    output_dir: ./results/pr-otel-storage
 
   # Build from the current working tree.
   - name: local-tree

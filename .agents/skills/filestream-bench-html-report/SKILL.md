@@ -166,12 +166,17 @@ Top to bottom:
    (`--description`); `--subtitle` goes to the sidebar.
 2. Hardware used in the test (`.host-profile`): CPU, memory, storage,
    platform, note.
-3. Parameters used in the test (`.cards`): files, events, corpus (dirs, file
-   size, bytes/line, total bytes), input / `harvester_limit` / `close_on_eof`,
-   fingerprint, scanner `check_interval`, registry backend/mode, output/queue.
-4. Benchmarks (`.grid` of color-coded `.experiment` cards, one per `--run`):
-   benchmark name/title (baseline badge on the first), commit, throughput
-   (events/s), max VmRSS, ingest time, shutdown time, total time.
+3. Benchmarks (`.grid` of color-coded `.experiment` cards, one per `--run`):
+   benchmark name/title (baseline badge on the first), optional short `.muted`
+   label, commit, throughput (events/s), max VmRSS, ingest time, shutdown time,
+   total time (verbose per-run `description` is omitted from the card and shown
+   in the "Benchmark details" table at the bottom of `#overview`).
+4. Parameters used in the test (`.cards.params-grid`, 4-column aligned grid):
+   files, events, corpus (dirs, file size, bytes/line, total bytes),
+   input / `harvester_limit` / `close_on_eof`, fingerprint,
+   scanner `check_interval`, registry backend/mode, output/queue. Multi-run
+   variants align in a two-column `.vary` grid (colored dots left, value and
+   sub-line right, separated by horizontal rules).
 5. Charts (`<h2>Charts</h2>`, then two `.panel.comparison-panel` sections with
    inline `<svg class="cmp-chart">`, no external assets):
    - "Comparison vs baseline": 2x2 horizontal bar graphs, in this order:
@@ -198,7 +203,7 @@ Top to bottom:
      text is left-aligned in every panel.
      Every `<rect>` bar/track and `<text>` value label in both overview charts
      (horizontal and vertical) carries `data-tooltip="{run.name}"` rendered by
-     the page's custom `.chart-tip` popup after 1,000 ms (1s) of hovering.
+     the page's custom `.chart-tip` popup after 200 ms (0.2s) of hovering.
    - "Memory: peak vs steady state (GiB)": vertical bar graph, two stacked
      panels, `Peak (whole run)` (`metrics.*.peak`) and
      `Steady state (pre-shutdown / steady window)`. Groups in both panels, in
@@ -217,6 +222,9 @@ Top to bottom:
      `HeapAlloc`, `RssAnon`): what it counts and its source
      (`/proc/<pid>/status`, `go tool pprof -sample_index=inuse_space`,
      `runtime.MemStats.*`).
+6. Benchmark details (`<h2>Benchmark details</h2>` + `.panel` with
+   `.comparison-table`): one row per run (`Benchmark`, `Description`)
+   containing the full per-run description moved out of the `.experiment` cards.
 
 ## Sidebar (`<aside> <nav>`)
 
